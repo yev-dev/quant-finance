@@ -1,7 +1,7 @@
 import pytest
 import pandas as pd
 import numpy as np
-from qf.timeseries.backtest import Backtest
+from qf.risk.backtest import Backtest
 
 @pytest.fixture
 def sample_data():

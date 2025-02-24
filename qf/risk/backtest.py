@@ -1,13 +1,13 @@
-#!/usr/bin/env python
+import os
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
 from scipy import stats
 
+from qf.risk import DATA_DIR
+
 plt.ioff()
-
-
 
 
 class Backtest:
@@ -180,9 +180,12 @@ class Backtest:
 
 if __name__ == "__main__":
 
+    returns_file = os.path.join(DATA_DIR, 'returns.txt')
+    predictions_file = os.path.join(DATA_DIR, 'quantile_predicitons.txt')
+
     # Test data: the daily log returns of the IBM stock and the 1% VaR forecasts stemming from a variety of risk models.
-    Y = pd.read_csv("input/returns.txt", index_col=0, parse_dates=True).iloc[:, 0]
-    X = pd.read_csv("input/quantile_predicitons.txt", index_col=0, parse_dates=True)
+    Y = pd.read_csv(returns_file, index_col=0, parse_dates=True).iloc[:, 0]
+    X = pd.read_csv(predictions_file, index_col=0, parse_dates=True)
 
     bt = Backtest(actual=Y, forecast=X.loc[:, "eGARCH-fhs"], alpha=0.01)
     bt.plot()
