@@ -1,5 +1,6 @@
 pandas
 numpy
+openpyxl
 statsmodels
 scikit-learn
 scipy
