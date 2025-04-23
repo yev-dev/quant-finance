@@ -17,3 +17,5 @@ lxml
 pandas_datareader
 yfinance
 bs4
+nbformat
+nbconvert
