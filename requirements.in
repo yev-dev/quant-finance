@@ -16,6 +16,9 @@ tabulate
 lxml
 pandas_datareader
 yfinance
+yahooquery
 bs4
 nbformat
 nbconvert
+cvxpy
+PyPortfolioOpt

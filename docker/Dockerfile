@@ -1,11 +1,11 @@
 FROM continuumio/anaconda3
 
-LABEL name="fda" \
+LABEL name="quant-finance" \
 summary="financial-data-analysis Python Docker image" \
 description="financial-data-analysis Python Docker image" \
-maintainer="yevgeniy.yermoshin@db.com"
+maintainer="yev.developer@gmail.com"
 
-ENV USER_NAME=fda-user
+ENV USER_NAME=qf-user
 
 ENV USER_ID=1000
 
