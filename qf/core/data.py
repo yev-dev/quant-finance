@@ -71,7 +71,7 @@ def _extract_esg_scores(esg_scores):
         "social": esg_scores.get("socialScore"),
         "governance": esg_scores.get("governanceScore"),
         "highest_controversy": esg_scores.get("highestControversy"),
-        "total": esg_scores.get("totalEsg"),
+        "esg_score": esg_scores.get("totalEsg"),
         "peer_count": esg_scores.get("peerCount"),
         "peer_group": esg_scores.get("peerGroup"),
         "rating_year": esg_scores.get("ratingYear"),
