@@ -77,7 +77,11 @@ class Strategy(object):
     def __init__(self) -> None:
         pass
 
-class Model(object):
+class DummyStrategy(Strategy):
+    pass
+
+
+class RiskModel(object):
 
     def __init__(self, start_date: str | None = None,
         end_date: str | None = None, df: pd.DataFrame | pd.Series = None, strategy: Strategy = None, *args, **kwargs) -> None:
@@ -97,7 +101,7 @@ class Model(object):
         
         self.verbose = kwargs.pop("verbose", False)
 
-        if isinstance(df, pd.DataFrame):
+        if df is not None and isinstance(df, pd.DataFrame):
             self.df = df
 
             if self.df.name is not None and self.df.name != "":
@@ -231,5 +235,10 @@ def get_var_historic(
         )  # The actual calculation without data wrangling
 
     raise TypeError("Expects pd.DataFrame or pd.Series, no other value.")
+
+
+if __name__ == '__main__':
+
+    model = RiskModel()
 
 
