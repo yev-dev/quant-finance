@@ -133,20 +133,29 @@ def get_yahoo_query_data(tickers):
     return ticker_data
 
 
-def get_yahoo_query_historical_data(tickers, period='10y', identifier='adjclose'):
+def get_yahoo_query_historical_data(tickers, period='10y', identifier_list=None):
     """
     Fetch historical stock data for given tickers from Yahoo Finance.
     Args:
         tickers (str or list): Stock ticker symbols.
         period (str): Period for which to fetch data (e.g., '1d', '1mo', '1y', '5y', '10y').
-        identifier (str): Identifier for the data to fetch (e.g., 'adjclose', 'close').
+        identifier_list (str): Identifier for the data to fetch (e.g., ['open', 'high', 'low', 'close', 'volume', 'adjclose', 'dividends']).
     Returns:
         pd.DataFrame: DataFrame containing historical stock data."""
 
     from yahooquery import Ticker
 
-    stock_data = Ticker(tickers, asynchronous=True).history(period=period)[identifier]
+    if identifier_list is None:
+        identifier_list = ['open', 'high', 'low', 'close', 'volume', 'adjclose', 'dividends']
+
+    stock_data = Ticker(tickers, asynchronous=True).history(period=period) if identifier_list is None else Ticker(tickers, asynchronous=True).history(period=period)[identifier_list]
+
+    # stock_data = stock_data.unstack(level=0)
+
+
     stock_data = stock_data.unstack(level=0)
+    stock_data.columns = stock_data.columns.droplevel(1)
+    stock_data.stack().reset_index().rename(index=str, columns={"level_1": "Ticker"}).sort_values(['Ticker','Date'])
 
     stock_data.index = pd.to_datetime(stock_data.index, format='mixed', utc=True)
     stock_data.index = stock_data.index.tz_localize(None)
@@ -255,7 +264,7 @@ def get_yahoo_query_full_data(tickers = None, features_list=None):
 
 if __name__ == "__main__":
     instruments_df = get_instruments_data()
-    instruments_df.to_csv('/Users/yevgeniy/Development/projects/quant/quant-finance/qf/clustering/data/instruments.csv', index=False)
+    # instruments_df.to_csv('/Users/yevgeniy/Development/projects/quant/quant-finance/qf/clustering/data/instruments.csv', index=False)
     tickers = instruments_df['symbol'].tolist()
     fundamentals_df = get_yahoo_query_full_data(tickers=tickers)
     saving_path = r'/Users/yevgeniy/Development/projects/quant/quant-finance/qf/clustering/data/fundamentals_data.csv'
