@@ -33,26 +33,8 @@ def load_raw_data(ticker, start_date, end_date):
     crash_df['vwretx'] = (crash_df['VWAP'] / crash_df['VWAP'].shift(1)) - 1
     crash_df['TICKER'] = crash_df['ticker']
     crash_df['Date'] = crash_df['date']
-    crash_df.dropna(inplace=True)
+    crash_df = crash_df.dropna()
     crash_df.set_index(pd.to_datetime(crash_df['date']), inplace=True)
-
-
-    # crash_data = pd.DataFrame()
-    # for i in ticker:
-    #     raw_data = get_yahoo_query_historical_data(i)
-    #     crash_df = pd.DataFrame()
-    #     crash_df['RET'] = (raw_data['Adj Close'] / raw_data['Adj Close'].shift(1)) - 1
-    #     crash_df.index = raw_data.index
-    #     crash_df['BIDLO'] = raw_data['Low']
-    #     crash_df['ASKHI'] = raw_data['High']
-    #     crash_df['PRC'] = raw_data['Close']
-    #     crash_df['VOL'] = raw_data['Volume']
-    #     typical_price = (raw_data['High'] + raw_data['Low'] + raw_data['Close']) / 3
-    #     crash_df['VWAP'] = (typical_price * raw_data['Volume']).cumsum() / raw_data['Volume'].cumsum()
-    #     crash_df['vwretx'] = (crash_df['VWAP'] / crash_df['VWAP'].shift(1)) - 1
-    #     crash_df['TICKER'] = i
-    #     crash_df.dropna(inplace=True)
-    #     crash_data = pd.concat([crash_data, crash_df])
 
     return crash_df
 
