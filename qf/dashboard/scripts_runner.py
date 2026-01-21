@@ -64,14 +64,20 @@ def _get_streamlit_config() -> Dict[str, Any]:
         return {}
 
 def get_runners_package() -> str:
-    """Return the configured runners package name from config.toml or default to 'runners'."""
+    """Return the configured runners package name from config.toml or default to 'runners'.
+
+    This reads only the top-level `runners_package` key in `.streamlit/config.toml`.
+    Previously the code looked under a `[dashboard]` table which is deprecated.
+    """
     data = _get_streamlit_config()
-    # Prefer [dashboard].runners_package, fallback to top-level runners_package
     pkg = None
     try:
-        pkg = (data.get("dashboard") or {}).get("runners_package")
-        if not pkg:
+        # Support both top-level and the legacy [dashboard] table for compatibility.
+        # Prefer top-level key if present, otherwise fall back to [dashboard].runners_package
+        if isinstance(data, dict):
             pkg = data.get("runners_package")
+            if not pkg and "dashboard" in data and isinstance(data["dashboard"], dict):
+                pkg = data["dashboard"].get("runners_package")
     except Exception:
         pkg = None
     pkg = (pkg or "runners").strip()

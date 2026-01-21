@@ -44,8 +44,9 @@ from scripts_runner import (
     get_status,
     terminate_process,
     get_runners_package,
-    set_runners_package,
+    _get_streamlit_config,
     set_runners_source_from_env,
+    set_runners_package,
 )
 
 # Point to the runners directory (one level down from this file)
@@ -107,57 +108,20 @@ def render_inputs(specs: List[ArgSpec]) -> Dict[str, Any]:
 # --- Tab renderers for modularity ---
 def render_script_runners_tab() -> None:
     st.header("Dynamic Python Script Runner")
-    # Show current runners package and allow runtime override
-    if "runners_package" not in st.session_state:
-        st.session_state["runners_package"] = get_runners_package()
+    # Runners package is resolved from the top-level config (no [dashboard] override)
+    runners_pkg = get_runners_package()
+    # Allow a session-only override (user may change package in the UI without saving)
+    if st.session_state.get("runners_package_override"):
+        runners_pkg = st.session_state.get("runners_package_override")
     st.caption(
-        f"Scans runner modules from package: '{st.session_state['runners_package']}', infers CLI parameters (argparse), and runs them."
+        f"Scans runner modules from package: '{runners_pkg}', infers CLI parameters (argparse), and runs them."
     )
-    col_pkg1, col_pkg2, col_pkg3 = st.columns([3, 1, 1])
-    with col_pkg1:
-        new_pkg = st.text_input(
-            "Runners package (runtime override)",
-            value=st.session_state["runners_package"],
-            help="Override for this session only; config.toml default remains unchanged.",
-        )
-    with col_pkg2:
-        if st.button("Use package"):
-            st.session_state["runners_package"] = new_pkg.strip() or st.session_state["runners_package"]
-            # Apply to backend using the currently selected environment's conda env
-            conda_env_for_pkg = (get_env_for(st.session_state["selected_env"]).get("CONDA_ENV") or "qf")
-            try:
-                set_runners_source_from_env(conda_env_for_pkg, st.session_state["runners_package"])  # prefer env path
-            except Exception:
-                set_runners_package(st.session_state["runners_package"])  # fallback
-            try:
-                st.rerun()
-            except Exception:
-                try:
-                    st.experimental_rerun()
-                except Exception:
-                    pass
-    with col_pkg3:
-        if st.button("Validate in Env"):
-            # Determine env and conda env
-            envs_list = list_env_names() or ["DEV", "UAT", "PROD"]
-            sel_env = st.session_state.get("selected_env", envs_list[0] if envs_list else "DEV")
-            env_vars_sel = get_env_for(sel_env)
-            conda_env_name = env_vars_sel.get("CONDA_ENV") or "qf"
-            target = (new_pkg or "").strip() or st.session_state["runners_package"]
-            from scripts_runner import validate_runners_package_in_env  # local import
-            ok, detail, pkg_dir, mods = validate_runners_package_in_env(conda_env_name, target)
-            # Compact notification: just environment name and number of modules
-            count = len(mods)
-            if ok:
-                st.success(f"{sel_env}: {count} modules")
-            else:
-                st.error(f"{sel_env}: {count} modules")
 
     # Environment selection (dynamically loaded from config.ini)
     st.subheader("Environment")
-    envs = list_env_names() or ["DEV", "UAT", "PROD"]
+    envs = list_env_names() or ["PROD", "UAT", "DEV"]
     # Ensure selected env exists; otherwise fall back to first
-    if st.session_state["selected_env"] not in envs:
+    if st.session_state.get("selected_env") not in envs:
         st.session_state["selected_env"] = envs[0]
     selected_env = st.selectbox(
         "Select environment",
@@ -171,21 +135,66 @@ def render_script_runners_tab() -> None:
             for k, v in env_vars.items():
                 st.write(f"- {k} = {v}")
 
+    # Optional: validate resolved runners package inside the selected conda env
+    col_pkg1, col_pkg2, col_pkg3 = st.columns([3, 1, 1])
+    # Session-only editable runners package input
+    with col_pkg1:
+        rp_key = "runners_package_override"
+        default_rp = st.session_state.get(rp_key, runners_pkg)
+        # Use a dedicated input key so value persists while editing
+        _ = st.text_input("Runners package (session)", value=default_rp, key="runners_pkg_input")
+    with col_pkg2:
+        if st.button("Apply runners package (session only)"):
+            new_pkg = st.session_state.get("runners_pkg_input", default_rp)
+            try:
+                set_runners_package(new_pkg)
+                st.session_state[rp_key] = new_pkg
+                st.success(f"Using runners package '{new_pkg}' for this session.")
+                try:
+                    st.rerun()
+                except Exception:
+                    try:
+                        st.experimental_rerun()
+                    except Exception:
+                        pass
+            except Exception as e:
+                st.error(f"Failed to apply runners package: {e}")
+    with col_pkg3:
+        if st.button("Validate package in Env"):
+            envs_list = list_env_names() or ["DEV", "UAT", "PROD"]
+            sel_env = st.session_state.get("selected_env", envs_list[0] if envs_list else "DEV")
+            env_vars_sel = get_env_for(sel_env)
+            conda_env_name = env_vars_sel.get("CONDA_ENV") or "qf"
+            from scripts_runner import validate_runners_package_in_env  # local import
+            ok, detail, pkg_dir, mods = validate_runners_package_in_env(conda_env_name, runners_pkg)
+            count = len(mods)
+            if ok:
+                st.success(f"{sel_env}: {count} modules (resolved at {pkg_dir})")
+            else:
+                st.error(f"{sel_env}: {count} modules — {detail}")
+
+    # (Environment selection moved earlier) Ensure selected env exists; otherwise fall back to first
+    envs = list_env_names() or ["PROD", "UAT", "DEV"]
+    if st.session_state.get("selected_env") not in envs:
+        st.session_state["selected_env"] = envs[0]
+    # keep env_vars set from earlier block
+    # env_vars is already defined above after selection
+
     # Ensure discovery points at the selected environment's package location
     conda_env_for_pkg = (env_vars.get("CONDA_ENV") or "qf") if env_vars else "qf"
     # Try to set runners source from the env; ignore failure (falls back to local resolution)
     try:
-        set_runners_source_from_env(conda_env_for_pkg, st.session_state["runners_package"])
+        set_runners_source_from_env(conda_env_for_pkg, runners_pkg)
     except Exception:
         pass
 
     modules = list_runner_modules()
     if not modules:
-        st.warning(f"No runner modules found in the '{st.session_state['runners_package']}' package.")
+        st.warning(f"No runner modules found in the '{runners_pkg}' package.")
         return
 
     # Import modules so Streamlit's watcher tracks changes
-    runners_pkg = st.session_state["runners_package"]
+    # runners_pkg already resolved above
     for _m in modules:
         try:
             importlib.import_module(f"{runners_pkg}.{_m}")
@@ -216,9 +225,13 @@ def render_script_runners_tab() -> None:
     if cfg_path_env:
         # Expand ~ and environment variables, then resolve relative paths against dashboard dir
         expanded = os.path.expanduser(os.path.expandvars(cfg_path_env))
-        config_dir = expanded if os.path.isabs(expanded) else os.path.join(DASHBOARD_DIR, expanded)
+        base_config_dir = expanded if os.path.isabs(expanded) else os.path.join(DASHBOARD_DIR, expanded)
     else:
-        config_dir = os.path.join(DASHBOARD_DIR, "config")
+        base_config_dir = os.path.join(DASHBOARD_DIR, "config")
+
+    # Dynamically create a nested path under the configured directory for this module
+    # e.g., <CONFIG_PATH>/<module_name>/<module_name>.json
+    config_dir = os.path.join(base_config_dir, module_name)
     config_path = os.path.join(config_dir, f"{module_name}.json")
     config_data = None
     generated_from_specs = False
@@ -266,9 +279,28 @@ def render_script_runners_tab() -> None:
     with st.expander("Config preset (optional)", expanded=False):
         st.caption("CONFIG_PATH should point to a base directory. The preset file path is derived from the selected module name.")
         st.caption(f"Config directory: {config_dir}")
+        # Show the computed default config file path and allow override
         st.code(config_path)
-        if not os.path.exists(config_dir):
-            st.info("Config directory not found. It will be created when you save.")
+        # Allow user to override the concrete JSON file path (stored in session per-module)
+        cfg_file_key = f"cfg_file_{module_name}"
+        default_cfg_file = st.session_state.get(cfg_file_key, config_path)
+        config_path_input = st.text_input("Config JSON file (override)", value=default_cfg_file, key=cfg_file_key)
+
+        # Inform if default directory doesn't exist (we'll create it on save)
+        if not os.path.exists(os.path.dirname(config_path_input)):
+            st.info("Config directory not found. It will be created when you save or if you change the path to an existing folder.")
+
+        # Validation button: check file existence and JSON validity
+        if st.button("Validate JSON file", key=f"cfg_validate_{module_name}"):
+            try:
+                if not os.path.exists(config_path_input):
+                    st.error(f"File does not exist: {config_path_input}")
+                else:
+                    with open(config_path_input, "r", encoding="utf-8") as jf:
+                        json.load(jf)
+                    st.success(f"Valid JSON file: {config_path_input}")
+            except Exception as e:
+                st.error(f"JSON validation failed: {e}")
         if config_data is None:
             st.info("No config file found and no defaults available.")
             # If CONFIG_PATH is set but a preset exists in bundled fallback, surface a hint
@@ -425,14 +457,59 @@ def render_script_runners_tab() -> None:
             col_s, col_r = st.columns(2)
             with col_s:
                 if st.button("Save Config", key="cfg_save_btn"):
+                    # Use the possibly-overridden config path input when saving
+                    target_path = config_path_input
                     try:
-                        os.makedirs(config_dir, exist_ok=True)
-                        with open(config_path, "w", encoding="utf-8") as f:
+                        os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                        with open(target_path, "w", encoding="utf-8") as f:
                             json.dump(working, f, indent=2)
-                        st.success("Config saved.")
+                        # Persist the chosen file path in session state
+                        st.session_state[cfg_file_key] = target_path
+                        st.success(f"Config saved to {target_path}.")
                     except Exception as e:
                         st.error(f"Failed to save config: {e}")
             with col_r:
+                # Dry run: show command and environment but do not execute
+                if st.button("Dry run (show config)", key=f"cfg_dryrun_{module_name}"):
+                    conda_env_cfg = (get_env_for(st.session_state["selected_env"]).get("CONDA_ENV") or "qf").strip()
+                    ok, detail = conda_env_exists(conda_env_cfg)
+                    if not ok:
+                        st.error(f"Conda environment '{conda_env_cfg}' not found. Details: {detail}")
+                    else:
+                        effective_env_cfg = dict(get_env_for(st.session_state["selected_env"]))
+                        if working.get("env"):
+                            effective_env_cfg.update({k: str(v) for k, v in working.get("env", {}).items()})
+                        if not working.get("noArgparse"):
+                            cfg_values = {}
+                            for a in working.get("args", []):
+                                name = str(a.get("name", "")).strip()
+                                if name:
+                                    cfg_values[name] = a.get("value")
+                            cmd_cfg = build_command(module_name, specs, cfg_values, conda_env_name=conda_env_cfg)
+                        else:
+                            rpkg = runners_pkg
+                            cmd_cfg = [
+                                "conda", "run", "-n", conda_env_cfg, "python", "-m", f"{rpkg}.{module_name}"
+                            ]
+                            defaults = working.get("defaults", {})
+                            provided = {k: v for k, v in defaults.items() if str(v).strip()}
+                            if working.get("passMode", "argv tokens") == "argv tokens":
+                                for k, v in provided.items():
+                                    cmd_cfg.append(f"{k}:{v}")
+                            else:
+                                effective_env_cfg.update(provided)
+                        cmd_str_cfg = " ".join(shlex.quote(c) for c in cmd_cfg)
+                        with st.expander("Dry run (config): command & environment", expanded=True):
+                            st.markdown("**Command (not executed):**")
+                            st.code(cmd_str_cfg)
+                            st.markdown("**Effective environment variables:**")
+                            st.json(effective_env_cfg)
+                            st.markdown("**Config values provided:**")
+                            if not working.get("noArgparse"):
+                                st.json({a.get('name'): a.get('value') for a in working.get('args', [])})
+                            else:
+                                st.json({k: v for k, v in working.get('defaults', {}).items()})
+
                 if st.button("Run with Config", key="cfg_run_btn"):
                     # Build command/env from working copy
                     conda_env_cfg = (get_env_for(st.session_state["selected_env"]).get("CONDA_ENV") or "qf").strip()
@@ -452,7 +529,7 @@ def render_script_runners_tab() -> None:
                             cmd_cfg = build_command(module_name, specs, cfg_values, conda_env_name=conda_env_cfg)
                         else:
                             # Use configured runners package for module execution
-                            rpkg = st.session_state.get("runners_package", get_runners_package())
+                            rpkg = runners_pkg
                             cmd_cfg = [
                                 "conda", "run", "-n", conda_env_cfg, "python", "-m", f"{rpkg}.{module_name}"
                             ]
@@ -489,6 +566,8 @@ def render_script_runners_tab() -> None:
         # Special-case UI when no argparse is present: collect tokens/env values
         run_date = cob_date = start_date = end_date = ""
         pass_mode = "argv tokens"
+        # Detached mode: start process but do not display stdout/logs in the UI
+        detached = st.checkbox("Detached (do not display log generation)", value=False, help="Start the process but don't show live or final logs in the dashboard UI.")
         if not specs:
             st.markdown("#### Non-argparse inputs (optional)")
             st.caption("Any string formats are accepted; values are concatenated and separated with ':' by the module.")
@@ -502,7 +581,47 @@ def render_script_runners_tab() -> None:
                 index=0,
                 help="Tokens are passed as NAME:VALUE on argv; env vars set RUN_DATE, COB_DATE, START_DATE, END_DATE",
             )
-        run_btn = st.form_submit_button("Run Module")
+        # Two submit buttons in the form: Run and Dry run (show command and env)
+        col_run_btn, col_dry_btn = st.columns([1, 1])
+        with col_run_btn:
+            run_btn = st.form_submit_button("Run Module")
+        with col_dry_btn:
+            dry_run_btn = st.form_submit_button("Dry run (show command)")
+
+    # If user clicked Dry run from the parameter form, compute and display the
+    # effective command and environment but do NOT start the subprocess.
+    if 'dry_run_btn' in locals() and dry_run_btn:
+        conda_env = env_vars.get("CONDA_ENV") or "qf"
+        exists, detail = conda_env_exists(conda_env)
+        if not exists:
+            st.error(f"Conda environment '{conda_env}' not found. Details: {detail}")
+        else:
+            cmd = build_command(module_name, specs, values, conda_env_name=conda_env)
+            # If no argparse specs, optionally pass tokens/env values for non-argparse modules
+            effective_env = dict(env_vars)
+            provided = {}
+            if not specs:
+                provided = {
+                    "RUN_DATE": run_date.strip(),
+                    "COB_DATE": cob_date.strip(),
+                    "START_DATE": start_date.strip(),
+                    "END_DATE": end_date.strip(),
+                }
+                provided = {k: v for k, v in provided.items() if v}
+                if provided:
+                    if pass_mode == "argv tokens":
+                        for k, v in provided.items():
+                            cmd.append(f"{k}:{v}")
+                    else:
+                        effective_env.update(provided)
+            cmd_str = " ".join(shlex.quote(c) for c in cmd)
+            with st.expander("Dry run: command & environment", expanded=True):
+                st.markdown("**Command (not executed):**")
+                st.code(cmd_str)
+                st.markdown("**Effective environment variables:**")
+                st.json(effective_env)
+                st.markdown("**Parameter values provided:**")
+                st.json(values if values else provided)
 
     # Show active run section if any
     if "active_run" in st.session_state and st.session_state["active_run"]:
@@ -525,26 +644,30 @@ def render_script_runners_tab() -> None:
                         except Exception:
                             pass
             with col2:
-                st.caption("Live output (tail)")
-                # Tail stdout/stderr if available
-                out_path = active.get("stdout_path")
-                err_path = active.get("stderr_path")
-                try:
-                    if out_path and os.path.exists(out_path):
-                        with open(out_path, "r", encoding="utf-8", errors="ignore") as f:
-                            out_lines = f.readlines()[-200:]
-                        st.code("".join(out_lines) or "(no output yet)")
-                except Exception:
-                    pass
-                try:
-                    if err_path and os.path.exists(err_path):
-                        with open(err_path, "r", encoding="utf-8", errors="ignore") as f:
-                            err_lines = f.readlines()[-200:]
-                        if err_lines:
-                            st.subheader("Stderr (tail)")
-                            st.code("".join(err_lines))
-                except Exception:
-                    pass
+                # If detached, do not show logs
+                if not active.get("detached"):
+                    st.caption("Log generation (tail)")
+                    # Tail stdout/stderr if available
+                    out_path = active.get("stdout_path")
+                    err_path = active.get("stderr_path")
+                    try:
+                        if out_path and os.path.exists(out_path):
+                            with open(out_path, "r", encoding="utf-8", errors="ignore") as f:
+                                out_lines = f.readlines()[-200:]
+                            st.text_area("", value="".join(out_lines) or "(no output yet)", height=300, key=f"live_log_{pid}")
+                    except Exception:
+                        pass
+                    try:
+                        if err_path and os.path.exists(err_path):
+                            with open(err_path, "r", encoding="utf-8", errors="ignore") as f:
+                                err_lines = f.readlines()[-200:]
+                            if err_lines:
+                                st.subheader("Stderr (tail)")
+                                st.code("".join(err_lines))
+                    except Exception:
+                        pass
+                else:
+                    st.info("Running in detached mode; logs are not shown in the UI.")
         else:
             # Finished; record log entry and clear active
             rc = status.get("returncode")
@@ -571,10 +694,10 @@ def render_script_runners_tab() -> None:
                 "stdout": out_text,
                 "stderr": err_text,
             })
-            # Show outputs once
-            if out_text:
-                st.subheader("Stdout")
-                st.code(out_text)
+            # Show outputs once (unless run was detached)
+            if out_text and not active.get("detached"):
+                st.subheader("Log generation")
+                st.text_area("", value=out_text, height=400, key=f"final_log_{pid}")
             if err_text:
                 st.subheader("Stderr")
                 st.code(err_text)
@@ -620,8 +743,14 @@ def render_script_runners_tab() -> None:
             **info,
             "module": module_name,
             "cmd": cmd_str,
+            "detached": bool(detached),
         }
-        st.success(f"Started module '{module_name}' (PID {info['pid']}). Use 'Terminate Run' to stop.")
+        msg = f"Started module '{module_name}' (PID {info['pid']})."
+        if detached:
+            msg += " Running in detached mode; logs are not displayed in the UI."
+        else:
+            msg += " Use 'Terminate Run' to stop and view live logs below."
+        st.success(msg)
         # Force a rerun so the active run controls appear immediately
         try:
             st.rerun()
@@ -642,8 +771,8 @@ def render_logs_tab() -> None:
             with st.expander(f"[{i}] {entry['time']} • {entry['module']} • rc={entry['returncode']}"):
                 st.code(entry["cmd"], language="bash")
                 if entry["stdout"]:
-                    st.subheader("Stdout")
-                    st.code(entry["stdout"])
+                    st.subheader("Log generation")
+                    st.text_area("", value=entry["stdout"], height=300, key=f"log_{i}")
                 if entry["stderr"]:
                     st.subheader("Stderr")
                     st.code(entry["stderr"])
@@ -947,6 +1076,43 @@ def render_reconciliation_tab() -> None:
 
 def render_tools_tab() -> None:
     st.header("Tools")
+    # --- Check Environment section (runs check_environment.py from parent tools dir) ---
+    st.subheader("Check Environment")
+    st.caption("Run a quick environment check using check_environment.py from the parent tools directory.")
+    envs = list_env_names() or ["DEV", "UAT", "PROD"]
+    sel_env_check = st.selectbox("Environment for check", envs, index=envs.index(st.session_state.get("selected_env", envs[0])))
+    check_cfg = get_env_for(sel_env_check)
+    conda_env_check = check_cfg.get("CONDA_ENV") or "qf"
+    # Candidate locations for check_environment.py
+    parent_tools_dir = os.path.join(os.path.dirname(DASHBOARD_DIR), "tools")
+    candidates = [
+        os.path.join(parent_tools_dir, "check_environment.py"),
+        os.path.join(DASHBOARD_DIR, "tools", "check_environment.py"),
+        os.path.join(os.path.dirname(DASHBOARD_DIR), "check_environment.py"),
+    ]
+    found_path = next((p for p in candidates if os.path.exists(p)), "")
+    path_key = "check_env_path"
+    default_path = st.session_state.get(path_key, found_path or os.path.join(parent_tools_dir, "check_environment.py"))
+    check_path = st.text_input("Path to check_environment.py (override)", value=default_path, key=path_key)
+    if st.button("Run environment check"):
+        if not check_path or not os.path.exists(check_path):
+            st.error(f"check_environment.py not found at: {check_path}")
+        else:
+            st.info(f"Running check with conda env '{conda_env_check}'...")
+            try:
+                cmd = ["conda", "run", "-n", conda_env_check, "python", check_path]
+                proc = run_subprocess(cmd, cwd=os.path.dirname(check_path))
+            except Exception as e:
+                st.error(f"Failed to run check_environment.py: {e}")
+            else:
+                out = proc.stdout or ""
+                err = proc.stderr or ""
+                combined = out
+                if err:
+                    combined += "\n\nSTDERR:\n" + err
+                with st.expander("Check Environment Output", expanded=True):
+                    st.text_area("", value=combined or "(no output)", height=400, key="check_env_out")
+
     st.subheader("Jupyter Notebook")
     st.caption("Start Jupyter Notebook in a chosen conda environment and directory. Environment variables from config.ini are passed to the notebook server.")
 
@@ -958,13 +1124,33 @@ def render_tools_tab() -> None:
     st.session_state["selected_env"] = nb_env
     nb_env_vars = get_env_for(nb_env)
     conda_env = nb_env_vars.get("CONDA_ENV") or "qf"
-    # Default start path from config.ini NOTEBOOK_PATH if present
-    default_nb_path = nb_env_vars.get("NOTEBOOK_PATH") or DASHBOARD_DIR
+    # Default start path: prefer `.streamlit/config.toml` -> dashboard.default_notebook_dir or
+    # top-level default_notebook_dir. Fall back to per-env NOTEBOOK_PATH, then to the user's home.
+    try:
+        _cfg = _get_streamlit_config() or {}
+        cfg_nb = None
+        if isinstance(_cfg, dict):
+            # Prefer top-level key; otherwise check [dashboard] table
+            cfg_nb = _cfg.get("default_notebook_dir")
+            if (not cfg_nb) and isinstance(_cfg.get("dashboard"), dict):
+                cfg_nb = _cfg["dashboard"].get("default_notebook_dir")
+        if cfg_nb and str(cfg_nb).strip():
+            # Expand ~ and env vars; resolve relative paths against dashboard dir
+            expanded = os.path.expanduser(os.path.expandvars(str(cfg_nb).strip()))
+            default_nb_path = expanded if os.path.isabs(expanded) else os.path.join(DASHBOARD_DIR, expanded)
+        else:
+            default_nb_path = nb_env_vars.get("NOTEBOOK_PATH") or os.path.expanduser("~")
+    except Exception:
+        default_nb_path = nb_env_vars.get("NOTEBOOK_PATH") or os.path.expanduser("~")
     # Persist selected notebook start path in session
     if "nb_path" not in st.session_state:
         st.session_state["nb_path"] = default_nb_path
-    nb_path = st.text_input("Start directory", value=st.session_state.get("nb_path", default_nb_path))
-    st.session_state["nb_path"] = nb_path
+    # Use an explicit widget key so we can programmatically update it when browsing
+    if "nb_path_input" not in st.session_state:
+        st.session_state["nb_path_input"] = st.session_state.get("nb_path", default_nb_path)
+    nb_path = st.text_input("Start directory", value=st.session_state.get("nb_path_input", default_nb_path), key="nb_path_input")
+    # Keep canonical nb_path in session synced with widget value
+    st.session_state["nb_path"] = st.session_state.get("nb_path_input", default_nb_path)
 
     col_b1, col_b2 = st.columns([1, 3])
     with col_b1:
@@ -992,15 +1178,18 @@ def render_tools_tab() -> None:
                 st.session_state["nb_browse_root"] = new_root
             pick = st.button("Select this folder", key="nb_browse_pick")
             if pick:
-                st.session_state["nb_browse_active"] = False
-                st.session_state["nb_path"] = st.session_state.get("nb_browse_root", DASHBOARD_DIR)
-                try:
-                    st.rerun()
-                except Exception:
+                    st.session_state["nb_browse_active"] = False
+                    chosen = st.session_state.get("nb_browse_root", DASHBOARD_DIR)
+                    # Update both the canonical path and the widget value so the text_input shows it
+                    st.session_state["nb_path"] = chosen
+                    st.session_state["nb_path_input"] = chosen
                     try:
-                        st.experimental_rerun()
+                        st.rerun()
                     except Exception:
-                        pass
+                        try:
+                            st.experimental_rerun()
+                        except Exception:
+                            pass
     
     st.caption("Notebook will be started detached; check logs/runs for output.")
     start_nb = st.button("Start Jupyter Notebook")
@@ -1024,7 +1213,18 @@ def render_tools_tab() -> None:
 
 def main() -> None:
     # Branding: Operational Dashboard with icon
-    st.set_page_config(page_title="Operational Dashboard", layout="wide", page_icon="📈")
+    # Prefer a user-configured dashboard name from .streamlit/config.toml
+    try:
+        _cfg = _get_streamlit_config() or {}
+        # Support both top-level and [dashboard] table keys
+        dashboard_name = (
+            (_cfg.get("dashboard") or {}).get("dashboard_name")
+            if isinstance(_cfg.get("dashboard"), dict)
+            else _cfg.get("dashboard_name")
+        ) or "Operational Dashboard"
+    except Exception:
+        dashboard_name = "Operational Dashboard"
+    st.set_page_config(page_title=dashboard_name, layout="wide", page_icon="📈")
     # Hide Streamlit's Deploy/Share control in the toolbar
     st.markdown(
         """
@@ -1047,7 +1247,7 @@ def main() -> None:
         except Exception:
             pass
     with col_title:
-        st.markdown("# Operational Dashboard")
+        st.markdown(f"# {dashboard_name}")
     setup_logging()
     logging.getLogger("dashboard").info("Dashboard started")
 
