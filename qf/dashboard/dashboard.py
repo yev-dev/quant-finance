@@ -45,13 +45,16 @@ from scripts_runner import (
     terminate_process,
     get_runners_package,
     set_runners_package,
+    set_runners_source_from_env,
 )
 
 # Point to the runners directory (one level down from this file)
 SCRIPT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "runners")
 # The dashboard directory (parent of runners)
 DASHBOARD_DIR = os.path.dirname(SCRIPT_DIR)
-LOG_DIR = os.path.join(DASHBOARD_DIR, "logs")
+# Centralize logs to user home: ~/.dashboard/logs
+HOME_LOG_DIR = os.path.join(os.path.expanduser("~"), ".dashboard", "logs")
+LOG_DIR = HOME_LOG_DIR
 LOG_FILE = os.path.join(LOG_DIR, "dashboard.log")
 UPLOADS_DIR = os.path.join(DASHBOARD_DIR, "uploads")
 def setup_logging() -> None:
@@ -110,7 +113,7 @@ def render_script_runners_tab() -> None:
     st.caption(
         f"Scans runner modules from package: '{st.session_state['runners_package']}', infers CLI parameters (argparse), and runs them."
     )
-    col_pkg1, col_pkg2 = st.columns([3, 1])
+    col_pkg1, col_pkg2, col_pkg3 = st.columns([3, 1, 1])
     with col_pkg1:
         new_pkg = st.text_input(
             "Runners package (runtime override)",
@@ -120,7 +123,12 @@ def render_script_runners_tab() -> None:
     with col_pkg2:
         if st.button("Use package"):
             st.session_state["runners_package"] = new_pkg.strip() or st.session_state["runners_package"]
-            set_runners_package(st.session_state["runners_package"])  # apply to backend
+            # Apply to backend using the currently selected environment's conda env
+            conda_env_for_pkg = (get_env_for(st.session_state["selected_env"]).get("CONDA_ENV") or "qf")
+            try:
+                set_runners_source_from_env(conda_env_for_pkg, st.session_state["runners_package"])  # prefer env path
+            except Exception:
+                set_runners_package(st.session_state["runners_package"])  # fallback
             try:
                 st.rerun()
             except Exception:
@@ -128,6 +136,22 @@ def render_script_runners_tab() -> None:
                     st.experimental_rerun()
                 except Exception:
                     pass
+    with col_pkg3:
+        if st.button("Validate in Env"):
+            # Determine env and conda env
+            envs_list = list_env_names() or ["DEV", "UAT", "PROD"]
+            sel_env = st.session_state.get("selected_env", envs_list[0] if envs_list else "DEV")
+            env_vars_sel = get_env_for(sel_env)
+            conda_env_name = env_vars_sel.get("CONDA_ENV") or "qf"
+            target = (new_pkg or "").strip() or st.session_state["runners_package"]
+            from scripts_runner import validate_runners_package_in_env  # local import
+            ok, detail, pkg_dir, mods = validate_runners_package_in_env(conda_env_name, target)
+            # Compact notification: just environment name and number of modules
+            count = len(mods)
+            if ok:
+                st.success(f"{sel_env}: {count} modules")
+            else:
+                st.error(f"{sel_env}: {count} modules")
 
     # Environment selection (dynamically loaded from config.ini)
     st.subheader("Environment")
@@ -146,6 +170,14 @@ def render_script_runners_tab() -> None:
         with st.expander("Loaded Environment Variables", expanded=False):
             for k, v in env_vars.items():
                 st.write(f"- {k} = {v}")
+
+    # Ensure discovery points at the selected environment's package location
+    conda_env_for_pkg = (env_vars.get("CONDA_ENV") or "qf") if env_vars else "qf"
+    # Try to set runners source from the env; ignore failure (falls back to local resolution)
+    try:
+        set_runners_source_from_env(conda_env_for_pkg, st.session_state["runners_package"])
+    except Exception:
+        pass
 
     modules = list_runner_modules()
     if not modules:
@@ -928,7 +960,47 @@ def render_tools_tab() -> None:
     conda_env = nb_env_vars.get("CONDA_ENV") or "qf"
     # Default start path from config.ini NOTEBOOK_PATH if present
     default_nb_path = nb_env_vars.get("NOTEBOOK_PATH") or DASHBOARD_DIR
-    nb_path = st.text_input("Start directory", value=default_nb_path)
+    # Persist selected notebook start path in session
+    if "nb_path" not in st.session_state:
+        st.session_state["nb_path"] = default_nb_path
+    nb_path = st.text_input("Start directory", value=st.session_state.get("nb_path", default_nb_path))
+    st.session_state["nb_path"] = nb_path
+
+    col_b1, col_b2 = st.columns([1, 3])
+    with col_b1:
+        if st.button("Browse directory", key="nb_browse_btn"):
+            st.session_state.setdefault("nb_browse_active", True)
+            # Initialize browse root to current notebook path or dashboard dir
+            init_root = st.session_state.get("nb_path", default_nb_path) or DASHBOARD_DIR
+            st.session_state.setdefault("nb_browse_root", init_root)
+    with col_b2:
+        if st.session_state.get("nb_browse_active"):
+            st.info("Browsing for Notebook start directory")
+            root = st.text_input(
+                "Current folder",
+                value=st.session_state.get("nb_browse_root", st.session_state.get("nb_path", default_nb_path)),
+                key="nb_browse_root_input",
+            )
+            try:
+                dirs = sorted([d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d))])
+            except Exception:
+                dirs = []
+            sel_dir = st.selectbox("Subdirectories", options=[".."] + dirs, key="nb_browse_sel")
+            nav = st.button("Open", key="nb_browse_open")
+            if nav:
+                new_root = os.path.abspath(os.path.join(root, sel_dir)) if sel_dir != ".." else os.path.abspath(os.path.join(root, ".."))
+                st.session_state["nb_browse_root"] = new_root
+            pick = st.button("Select this folder", key="nb_browse_pick")
+            if pick:
+                st.session_state["nb_browse_active"] = False
+                st.session_state["nb_path"] = st.session_state.get("nb_browse_root", DASHBOARD_DIR)
+                try:
+                    st.rerun()
+                except Exception:
+                    try:
+                        st.experimental_rerun()
+                    except Exception:
+                        pass
     
     st.caption("Notebook will be started detached; check logs/runs for output.")
     start_nb = st.button("Start Jupyter Notebook")
@@ -941,8 +1013,9 @@ def render_tools_tab() -> None:
             cmd = ["conda", "run", "-n", conda_env, "jupyter", "notebook"]
             try:
                 prefix = f"{datetime.now():%Y%m%d-%H%M%S}_jupyter"
-                info = start_subprocess(cmd, cwd=nb_path or DASHBOARD_DIR, extra_env=nb_env_vars, log_prefix=prefix)
-                st.success(f"Jupyter Notebook started (PID {info['pid']}) in '{nb_path}'.")
+                start_dir = st.session_state.get("nb_path", nb_path) or DASHBOARD_DIR
+                info = start_subprocess(cmd, cwd=start_dir, extra_env=nb_env_vars, log_prefix=prefix)
+                st.success(f"Jupyter Notebook started (PID {info['pid']}) in '{start_dir}'.")
                 st.caption("Open the printed URL from logs (uploads/logs). If using token authentication, copy token from logs.")
             except Exception as e:
                 logging.getLogger("dashboard").exception("Failed to start Jupyter Notebook")

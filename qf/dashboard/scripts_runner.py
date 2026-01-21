@@ -15,6 +15,7 @@ import shlex
 import subprocess
 import logging
 import configparser
+import shutil
 import json
 import signal
 import time
@@ -78,7 +79,8 @@ def get_runners_package() -> str:
 
 RUNNERS_PACKAGE = get_runners_package()
 CONDA_ENV_NAME = "qf"
-HOME_CONFIG_DIRNAME = ".qf_dashboard"
+HOME_CONFIG_DIRNAME = ".dashboard"
+OLD_HOME_CONFIG_DIRNAME = ".qf_dashboard"
 HOME_CONFIG_FILENAME = "config.ini"
 def _resolve_package_dir(pkg_name: str) -> str:
     """Resolve a package/module name to its filesystem directory.
@@ -97,7 +99,9 @@ def _resolve_package_dir(pkg_name: str) -> str:
     return os.path.join(os.path.dirname(__file__), pkg_name.replace(".", os.sep))
 
 RUNNERS_DIR = _resolve_package_dir(RUNNERS_PACKAGE)
-LOGS_DIR = os.path.join(os.path.dirname(__file__), "logs")
+# Store logs under user's home: ~/.dashboard/logs and runs under ~/.dashboard/logs/runs
+HOME_BASE_DIR = os.path.join(os.path.expanduser("~"), HOME_CONFIG_DIRNAME)
+LOGS_DIR = os.path.join(HOME_BASE_DIR, "logs")
 RUN_LOGS_DIR = os.path.join(LOGS_DIR, "runs")
 
 def set_runners_package(pkg_name: str) -> None:
@@ -109,6 +113,121 @@ def set_runners_package(pkg_name: str) -> None:
     pkg_name = (pkg_name or "runners").strip()
     RUNNERS_PACKAGE = pkg_name or "runners"
     RUNNERS_DIR = _resolve_package_dir(RUNNERS_PACKAGE)
+
+from typing import Tuple
+
+def validate_runners_package(pkg_name: str) -> Tuple[bool, str, str, List[str]]:
+    """Validate that a runners package can be located and list modules under it.
+
+    Returns (ok, detail, directory, modules).
+    - ok: True if directory exists and at least one module is found; False otherwise
+    - detail: status message including import/resolve info
+    - directory: resolved filesystem directory for the package
+    - modules: discovered module names (without .py)
+    """
+    name = (pkg_name or "").strip()
+    if not name:
+        return False, "Empty package name", "", []
+    # Try import for visibility on sys.path
+    imported_ok = True
+    try:
+        importlib.import_module(name)
+    except Exception as e:
+        imported_ok = False
+        import_err = str(e)
+    # Resolve directory (works even if import failed when using local path fallback)
+    pkg_dir = _resolve_package_dir(name)
+    if not os.path.isdir(pkg_dir):
+        msg = f"Package directory not found: {pkg_dir}"
+        if not imported_ok:
+            msg += f"; import failed: {import_err}"
+        return False, msg, pkg_dir, []
+    # List python modules
+    mods: List[str] = []
+    try:
+        for entry in os.listdir(pkg_dir):
+            if entry.endswith(".py") and not entry.startswith("__"):
+                mods.append(entry[:-3])
+    except Exception as e:
+        return False, f"Failed to list modules: {e}", pkg_dir, []
+    if not mods:
+        msg = "No modules (*.py) found in package directory"
+        if not imported_ok:
+            msg += f"; import failed: {import_err}"
+        return False, msg, pkg_dir, []
+    detail = f"Resolved to {pkg_dir}. {'Import OK' if imported_ok else 'Import failed'}; {len(mods)} module(s) found"
+    return True, detail, pkg_dir, sorted(mods)
+
+
+def _resolve_package_dir_in_conda_env(env_name: str, pkg_name: str) -> Tuple[bool, str, str]:
+    """Resolve a package directory inside a specific conda environment.
+
+    Returns (ok, directory, error_message).
+    """
+    env_name = (env_name or "").strip()
+    pkg_name = (pkg_name or "").strip()
+    if not env_name or not pkg_name:
+        return False, "", "Environment name or package name is empty"
+    py = (
+        "import importlib, os; "
+        f"m=importlib.import_module('{pkg_name}'); "
+        "d=os.path.dirname(getattr(m,'__file__','')) if getattr(m,'__file__', None) else list(m.__path__)[0]; "
+        "print(d)"
+    )
+    try:
+        proc = subprocess.run(
+            ["conda", "run", "-n", env_name, "python", "-c", py],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        return False, "", "conda executable not found on PATH"
+    except Exception as e:
+        return False, "", f"Failed to run conda: {e}"
+    if proc.returncode != 0:
+        return False, "", f"conda run returned {proc.returncode}: {proc.stderr.strip()}"
+    directory = proc.stdout.strip().splitlines()[-1] if proc.stdout else ""
+    if not directory or not os.path.isdir(directory):
+        return False, directory, f"Resolved path invalid or not a directory: {directory}"
+    return True, directory, ""
+
+
+def set_runners_source_from_env(env_name: str, pkg_name: str) -> Tuple[bool, str]:
+    """Set the runners package and directory using a specific conda environment.
+
+    Attempts to resolve the package directory inside the given conda env; on success,
+    updates globals so discovery and parsing use that directory. Returns (ok, detail).
+    """
+    ok, directory, err = _resolve_package_dir_in_conda_env(env_name, pkg_name)
+    if not ok:
+        # Fallback to default resolution while returning error detail
+        set_runners_package(pkg_name)
+        return False, f"Fallback to local resolution. Reason: {err}"
+    # Apply
+    global RUNNERS_PACKAGE, RUNNERS_DIR
+    RUNNERS_PACKAGE = (pkg_name or "runners").strip() or "runners"
+    RUNNERS_DIR = directory
+    return True, f"Using {RUNNERS_PACKAGE} from {RUNNERS_DIR}"
+
+
+def validate_runners_package_in_env(env_name: str, pkg_name: str) -> Tuple[bool, str, str, List[str]]:
+    """Validate a runners package by resolving it inside a given conda environment and listing modules.
+
+    Returns (ok, detail, directory, modules).
+    """
+    ok, directory, err = _resolve_package_dir_in_conda_env(env_name, pkg_name)
+    if not ok:
+        return False, f"Failed to resolve in env '{env_name}': {err}", directory, []
+    # List modules in that directory
+    try:
+        mods = [e[:-3] for e in os.listdir(directory) if e.endswith(".py") and not e.startswith("__")]
+    except Exception as e:
+        return False, f"Resolved to {directory} but failed to list modules: {e}", directory, []
+    if not mods:
+        return False, f"Resolved to {directory} in env '{env_name}' but found no .py modules", directory, []
+    detail = f"Resolved in env '{env_name}' to {directory}; {len(mods)} module(s) found"
+    return True, detail, directory, sorted(mods)
 
 
 def _to_name_from_flag(flag: str) -> str:
@@ -272,6 +391,16 @@ def ensure_default_env_config() -> None:
     cfg_path = get_env_config_path()
     if os.path.exists(cfg_path):
         return
+    # Migrate old config from ~/.qf_dashboard/config.ini if present
+    old_cfg_path = os.path.join(os.path.expanduser("~"), OLD_HOME_CONFIG_DIRNAME, HOME_CONFIG_FILENAME)
+    if os.path.exists(old_cfg_path):
+        os.makedirs(os.path.dirname(cfg_path), exist_ok=True)
+        try:
+            shutil.copy2(old_cfg_path, cfg_path)
+            return
+        except Exception:
+            # Fall back to generating a fresh default if copy fails
+            pass
     os.makedirs(os.path.dirname(cfg_path), exist_ok=True)
     cp = configparser.ConfigParser()
     cp["DEV"] = {
