@@ -43,6 +43,8 @@ from scripts_runner import (
     start_subprocess,
     get_status,
     terminate_process,
+    get_runners_package,
+    set_runners_package,
 )
 
 # Point to the runners directory (one level down from this file)
@@ -102,7 +104,30 @@ def render_inputs(specs: List[ArgSpec]) -> Dict[str, Any]:
 # --- Tab renderers for modularity ---
 def render_script_runners_tab() -> None:
     st.header("Dynamic Python Script Runner")
-    st.caption("Scans runner modules, infers CLI parameters (argparse), and runs them.")
+    # Show current runners package and allow runtime override
+    if "runners_package" not in st.session_state:
+        st.session_state["runners_package"] = get_runners_package()
+    st.caption(
+        f"Scans runner modules from package: '{st.session_state['runners_package']}', infers CLI parameters (argparse), and runs them."
+    )
+    col_pkg1, col_pkg2 = st.columns([3, 1])
+    with col_pkg1:
+        new_pkg = st.text_input(
+            "Runners package (runtime override)",
+            value=st.session_state["runners_package"],
+            help="Override for this session only; config.toml default remains unchanged.",
+        )
+    with col_pkg2:
+        if st.button("Use package"):
+            st.session_state["runners_package"] = new_pkg.strip() or st.session_state["runners_package"]
+            set_runners_package(st.session_state["runners_package"])  # apply to backend
+            try:
+                st.rerun()
+            except Exception:
+                try:
+                    st.experimental_rerun()
+                except Exception:
+                    pass
 
     # Environment selection (dynamically loaded from config.ini)
     st.subheader("Environment")
@@ -124,13 +149,14 @@ def render_script_runners_tab() -> None:
 
     modules = list_runner_modules()
     if not modules:
-        st.warning("No runner modules found in the 'runners' package.")
+        st.warning(f"No runner modules found in the '{st.session_state['runners_package']}' package.")
         return
 
     # Import modules so Streamlit's watcher tracks changes
+    runners_pkg = st.session_state["runners_package"]
     for _m in modules:
         try:
-            importlib.import_module(f"runners.{_m}")
+            importlib.import_module(f"{runners_pkg}.{_m}")
         except Exception:
             pass
 
@@ -393,8 +419,10 @@ def render_script_runners_tab() -> None:
                                     cfg_values[name] = a.get("value")
                             cmd_cfg = build_command(module_name, specs, cfg_values, conda_env_name=conda_env_cfg)
                         else:
+                            # Use configured runners package for module execution
+                            rpkg = st.session_state.get("runners_package", get_runners_package())
                             cmd_cfg = [
-                                "conda", "run", "-n", conda_env_cfg, "python", "-m", f"runners.{module_name}"
+                                "conda", "run", "-n", conda_env_cfg, "python", "-m", f"{rpkg}.{module_name}"
                             ]
                             defaults = working.get("defaults", {})
                             provided = {k: v for k, v in defaults.items() if str(v).strip()}

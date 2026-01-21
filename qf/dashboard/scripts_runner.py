@@ -21,6 +21,11 @@ import time
 from datetime import datetime
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
+import importlib
+try:
+    import tomllib  # Python 3.11+
+except Exception:  # pragma: no cover
+    tomllib = None
 
 
 @dataclass
@@ -44,13 +49,66 @@ class ArgSpec:
 
 
 SELF_NAME = os.path.basename(__file__)
-RUNNERS_PACKAGE = "runners"
+
+def _get_streamlit_config() -> Dict[str, Any]:
+    """Read .streamlit/config.toml if available and return a dict."""
+    cfg_path = os.path.join(os.path.dirname(__file__), ".streamlit", "config.toml")
+    if not os.path.exists(cfg_path) or tomllib is None:
+        return {}
+    try:
+        with open(cfg_path, "rb") as f:
+            data = tomllib.load(f)
+        return data or {}
+    except Exception:
+        return {}
+
+def get_runners_package() -> str:
+    """Return the configured runners package name from config.toml or default to 'runners'."""
+    data = _get_streamlit_config()
+    # Prefer [dashboard].runners_package, fallback to top-level runners_package
+    pkg = None
+    try:
+        pkg = (data.get("dashboard") or {}).get("runners_package")
+        if not pkg:
+            pkg = data.get("runners_package")
+    except Exception:
+        pkg = None
+    pkg = (pkg or "runners").strip()
+    return pkg or "runners"
+
+RUNNERS_PACKAGE = get_runners_package()
 CONDA_ENV_NAME = "qf"
 HOME_CONFIG_DIRNAME = ".qf_dashboard"
 HOME_CONFIG_FILENAME = "config.ini"
-RUNNERS_DIR = os.path.join(os.path.dirname(__file__), RUNNERS_PACKAGE)
+def _resolve_package_dir(pkg_name: str) -> str:
+    """Resolve a package/module name to its filesystem directory.
+
+    Imports the package and returns its path. If resolution fails, fall back to a local path.
+    """
+    try:
+        mod = importlib.import_module(pkg_name)
+        if hasattr(mod, "__path__") and mod.__path__:
+            return mod.__path__[0]
+        if hasattr(mod, "__file__") and mod.__file__:
+            return os.path.dirname(mod.__file__)
+    except Exception:
+        pass
+    # Fallback: treat dots as directory separators relative to dashboard
+    return os.path.join(os.path.dirname(__file__), pkg_name.replace(".", os.sep))
+
+RUNNERS_DIR = _resolve_package_dir(RUNNERS_PACKAGE)
 LOGS_DIR = os.path.join(os.path.dirname(__file__), "logs")
 RUN_LOGS_DIR = os.path.join(LOGS_DIR, "runs")
+
+def set_runners_package(pkg_name: str) -> None:
+    """Override the runners package at runtime and recompute the directory.
+
+    This affects discovery (list_runner_modules), argparse parsing, and command builds.
+    """
+    global RUNNERS_PACKAGE, RUNNERS_DIR
+    pkg_name = (pkg_name or "runners").strip()
+    RUNNERS_PACKAGE = pkg_name or "runners"
+    RUNNERS_DIR = _resolve_package_dir(RUNNERS_PACKAGE)
 
 
 def _to_name_from_flag(flag: str) -> str:

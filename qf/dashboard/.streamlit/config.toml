@@ -3,3 +3,10 @@
 fileWatcherType = "watchdog"
 # Rerun the app automatically when the source files are saved
 runOnSave = true
+
+[dashboard]
+# Python package path that contains runner scripts (used for discovery and execution)
+# Example values:
+#   "runners"                  -> local package qf/dashboard/runners
+#   "myproj.tools.runners"     -> nested package path
+runners_package = "runners"
