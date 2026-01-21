@@ -1,0 +1,5 @@
+[server]
+# Use watchdog-based file watching for faster and broader change detection
+fileWatcherType = "watchdog"
+# Rerun the app automatically when the source files are saved
+runOnSave = true

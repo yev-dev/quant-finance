@@ -17,5 +17,12 @@
         "**/*.pyc": {"when": "$(basename).py"}, 
         "**/__pycache__": true,
         "**/*.egg-info": true
-    }
+    },
+    "python-envs.pythonProjects": [
+        {
+            "path": "",
+            "envManager": "ms-python.python:conda",
+            "packageManager": "ms-python.python:conda"
+        }
+    ]
 }

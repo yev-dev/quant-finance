@@ -4,6 +4,22 @@
       {
         "label": "clear-editor-history",
         "command": "${command:workbench.action.clearEditorHistory}"
+      },
+      {
+        "label": "Start Dashboard (Streamlit)",
+        "type": "shell",
+        "command": "streamlit",
+        "args": [
+          "run",
+          "dashboard.py",
+          "--server.fileWatcherType=watchdog",
+          "--server.runOnSave=true"
+        ],
+        "options": {
+          "cwd": "${workspaceFolder}/qf/dashboard"
+        },
+        "group": "build",
+        "problemMatcher": []
       }
     ]
   }

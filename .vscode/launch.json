@@ -1,0 +1,20 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Streamlit: Run Dashboard",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "streamlit",
+      "args": [
+        "run",
+        "dashboard.py",
+        "--server.fileWatcherType=watchdog",
+        "--server.runOnSave=true"
+      ],
+      "cwd": "${workspaceFolder}/qf/dashboard",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    }
+  ]
+}
