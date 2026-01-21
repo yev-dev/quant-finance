@@ -30,6 +30,10 @@ subprocess launcher.
 
 import os
 import sys
+import time
+import threading
+import logging
+from datetime import datetime
 from typing import Dict, Optional
 
 KEYS = ["RUN_DATE", "COB_DATE", "START_DATE", "END_DATE"]
@@ -59,6 +63,16 @@ def get_env(name: str) -> Optional[str]:
 
 
 def main(argv: list[str]) -> int:
+    # Initialize logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    )
+    logger = logging.getLogger("third_model")
+
+    start_time = time.perf_counter()
+    logger.info("Process started")
+
     # First, parse argv tokens
     params = parse_tokens(argv)
 
@@ -77,6 +91,29 @@ def main(argv: list[str]) -> int:
         return 0
 
     result = ":".join(values)
+
+    # Simulate a calculation for ~60 seconds in a background thread
+    def _simulate_calculation(duration_sec: int = 60, report_every_sec: int = 5) -> None:
+        t0 = time.perf_counter()
+        next_report = report_every_sec
+        while True:
+            elapsed = time.perf_counter() - t0
+            if elapsed >= duration_sec:
+                break
+            # Periodic progress messages
+            if elapsed >= next_report:
+                logger.info("Simulated computation... %.0f/%.0f seconds", elapsed, duration_sec)
+                next_report += report_every_sec
+            time.sleep(0.2)
+        logger.info("Simulated computation completed (%.2f seconds)", elapsed)
+
+    worker = threading.Thread(target=_simulate_calculation, kwargs={"duration_sec": 60, "report_every_sec": 5}, daemon=False)
+    worker.start()
+    worker.join()
+
+    elapsed_total = time.perf_counter() - start_time
+    logger.info("Process finished in %.2f seconds at %s", elapsed_total, datetime.now().isoformat(timespec="seconds"))
+
     print(result)
     return 0
 

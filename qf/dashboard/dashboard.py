@@ -455,6 +455,8 @@ def render_script_runners_tab() -> None:
             # Persist working copy back into session and provide actions
             st.session_state[work_key] = working
 
+            # Detach toggle for config-based run
+            detach_cfg = st.checkbox("Detach mode", value=True, key="cfg_detach_mode", help="Run asynchronously when enabled; otherwise run synchronously and show output inline.")
             col_s, col_r = st.columns(2)
             with col_s:
                 if st.button("Save Config", key="cfg_save_btn"):
@@ -544,22 +546,91 @@ def render_script_runners_tab() -> None:
                         cmd_str_cfg = " ".join(shlex.quote(c) for c in cmd_cfg)
                         st.write("Command (config):")
                         st.code(cmd_str_cfg)
+                        # Log config-based run request
                         try:
-                            prefix = f"{datetime.now():%Y%m%d-%H%M%S}_{module_name}_cfg"
-                            info = start_subprocess(cmd_cfg, cwd=DASHBOARD_DIR, extra_env=effective_env_cfg, log_prefix=prefix)
-                        except Exception as e:
-                            logging.getLogger("dashboard").exception("Run with config failed for module %s", module_name)
-                            st.error(f"Failed to start subprocess: {e}")
-                        else:
-                            st.session_state["active_run"] = {**info, "module": module_name, "cmd": cmd_str_cfg}
-                            st.success(f"Started module '{module_name}' from config (PID {info['pid']}).")
+                            logging.getLogger("dashboard").info(
+                                "RunWithConfig requested: module=%s env=%s mode=%s cmd=%s",
+                                module_name,
+                                conda_env_cfg,
+                                "detached" if detach_cfg else "sync",
+                                cmd_str_cfg,
+                            )
+                        except Exception:
+                            pass
+                        if detach_cfg:
                             try:
-                                st.rerun()
-                            except Exception:
+                                prefix = f"{datetime.now():%Y%m%d-%H%M%S}_{module_name}_cfg"
+                                info = start_subprocess(cmd_cfg, cwd=DASHBOARD_DIR, extra_env=effective_env_cfg, log_prefix=prefix)
+                            except Exception as e:
+                                logging.getLogger("dashboard").exception("Run with config failed for module %s", module_name)
+                                st.error(f"Failed to start subprocess: {e}")
+                            else:
+                                st.session_state["active_run"] = {**info, "module": module_name, "cmd": cmd_str_cfg, "detached": True}
                                 try:
-                                    st.experimental_rerun()
+                                    logging.getLogger("dashboard").info(
+                                        "Started run (config): module=%s pid=%s stdout=%s stderr=%s",
+                                        module_name,
+                                        info.get("pid"),
+                                        info.get("stdout_path"),
+                                        info.get("stderr_path"),
+                                    )
                                 except Exception:
                                     pass
+                                st.success(f"Started module '{module_name}' from config (PID {info['pid']}). Running in detached mode.")
+                                # Show initial tail without rerun
+                                out_path = info.get("stdout_path")
+                                err_path = info.get("stderr_path")
+                                if out_path and os.path.exists(out_path):
+                                    try:
+                                        with open(out_path, "r", encoding="utf-8", errors="ignore") as f:
+                                            out_lines = f.readlines()[-200:]
+                                        st.subheader("Log generation (tail)")
+                                        st.text_area("Stdout", value="".join(out_lines) or "(no output yet)", height=300, key=f"initial_cfg_tail_{info['pid']}", label_visibility="collapsed")
+                                    except Exception:
+                                        pass
+                                if err_path and os.path.exists(err_path):
+                                    try:
+                                        with open(err_path, "r", encoding="utf-8", errors="ignore") as f:
+                                            err_lines = f.readlines()[-200:]
+                                        if err_lines:
+                                            st.subheader("Stderr (tail)")
+                                            st.code("".join(err_lines))
+                                    except Exception:
+                                        pass
+                        else:
+                            # Run synchronously and show outputs inline
+                            try:
+                                _t0_cfg = datetime.now()
+                                result = run_subprocess(cmd_cfg, cwd=DASHBOARD_DIR, extra_env=effective_env_cfg)
+                            except Exception as e:
+                                logging.getLogger("dashboard").exception("Run with config failed for module %s", module_name)
+                                st.error(f"Run failed: {e}")
+                            else:
+                                st.success(f"Run (config) finished (rc={result.returncode}).")
+                                try:
+                                    elapsed_cfg = (datetime.now() - _t0_cfg).total_seconds()
+                                    logging.getLogger("dashboard").info(
+                                        "Run (config) finished: module=%s rc=%s elapsed=%.3fs",
+                                        module_name,
+                                        result.returncode,
+                                        elapsed_cfg,
+                                    )
+                                except Exception:
+                                    pass
+                                if result.stdout:
+                                    st.subheader("Log generation")
+                                    st.text_area("Stdout", value=result.stdout, height=400, key=f"final_sync_cfg_log_{module_name}", label_visibility="collapsed")
+                                if result.stderr:
+                                    st.subheader("Stderr")
+                                    st.code(result.stderr)
+                                st.session_state["run_logs"].append({
+                                    "time": datetime.now().isoformat(timespec="seconds"),
+                                    "module": module_name,
+                                    "cmd": cmd_str_cfg,
+                                    "returncode": result.returncode,
+                                    "stdout": result.stdout or "",
+                                    "stderr": result.stderr or "",
+                                })
 
     st.subheader("Inputs")
     with st.form("params_form"):
@@ -568,7 +639,7 @@ def render_script_runners_tab() -> None:
         run_date = cob_date = start_date = end_date = ""
         pass_mode = "argv tokens"
         # Detached mode: start process but do not display stdout/logs in the UI
-        detached = st.checkbox("Detached (do not display log generation)", value=False, help="Start the process but don't show live or final logs in the dashboard UI.")
+        detached = st.checkbox("Detach mode (async)", value=True, help="Run asynchronously without forcing a page rerun. Logs will be shown below.")
         if not specs:
             st.markdown("#### Non-argparse inputs (optional)")
             st.caption("Any string formats are accepted; values are concatenated and separated with ':' by the module.")
@@ -645,30 +716,27 @@ def render_script_runners_tab() -> None:
                         except Exception:
                             pass
             with col2:
-                # If detached, do not show logs
-                if not active.get("detached"):
-                    st.caption("Log generation (tail)")
-                    # Tail stdout/stderr if available
-                    out_path = active.get("stdout_path")
-                    err_path = active.get("stderr_path")
-                    try:
-                        if out_path and os.path.exists(out_path):
-                            with open(out_path, "r", encoding="utf-8", errors="ignore") as f:
-                                out_lines = f.readlines()[-200:]
-                            st.text_area("", value="".join(out_lines) or "(no output yet)", height=300, key=f"live_log_{pid}")
-                    except Exception:
-                        pass
-                    try:
-                        if err_path and os.path.exists(err_path):
-                            with open(err_path, "r", encoding="utf-8", errors="ignore") as f:
-                                err_lines = f.readlines()[-200:]
-                            if err_lines:
-                                st.subheader("Stderr (tail)")
-                                st.code("".join(err_lines))
-                    except Exception:
-                        pass
-                else:
-                    st.info("Running in detached mode; logs are not shown in the UI.")
+                # Show logs (tail) regardless of detach mode
+                st.caption("Log generation (tail)")
+                # Tail stdout/stderr if available
+                out_path = active.get("stdout_path")
+                err_path = active.get("stderr_path")
+                try:
+                    if out_path and os.path.exists(out_path):
+                        with open(out_path, "r", encoding="utf-8", errors="ignore") as f:
+                            out_lines = f.readlines()[-200:]
+                        st.text_area("Stdout", value="".join(out_lines) or "(no output yet)", height=300, key=f"live_log_{pid}", label_visibility="collapsed")
+                except Exception:
+                    pass
+                try:
+                    if err_path and os.path.exists(err_path):
+                        with open(err_path, "r", encoding="utf-8", errors="ignore") as f:
+                            err_lines = f.readlines()[-200:]
+                        if err_lines:
+                            st.subheader("Stderr (tail)")
+                            st.code("".join(err_lines))
+                except Exception:
+                    pass
         else:
             # Finished; record log entry and clear active
             rc = status.get("returncode")
@@ -687,6 +755,25 @@ def render_script_runners_tab() -> None:
             except Exception:
                 pass
             st.success(f"Run finished (rc={rc}).")
+            # Log completion details with timing if available
+            try:
+                started_at = active.get("started_at")
+                elapsed_s = None
+                if started_at:
+                    try:
+                        dt0 = datetime.fromisoformat(str(started_at))
+                        elapsed_s = (datetime.now() - dt0).total_seconds()
+                    except Exception:
+                        elapsed_s = None
+                logging.getLogger("dashboard").info(
+                    "Run completed: module=%s rc=%s elapsed=%s cmd=%s",
+                    active.get("module"),
+                    rc,
+                    f"{elapsed_s:.3f}s" if isinstance(elapsed_s, float) else "n/a",
+                    active.get("cmd"),
+                )
+            except Exception:
+                pass
             st.session_state["run_logs"].append({
                 "time": datetime.now().isoformat(timespec="seconds"),
                 "module": active.get("module"),
@@ -698,7 +785,7 @@ def render_script_runners_tab() -> None:
             # Show outputs once (unless run was detached)
             if out_text and not active.get("detached"):
                 st.subheader("Log generation")
-                st.text_area("", value=out_text, height=400, key=f"final_log_{pid}")
+                st.text_area("Stdout", value=out_text, height=400, key=f"final_log_{pid}", label_visibility="collapsed")
             if err_text:
                 st.subheader("Stderr")
                 st.code(err_text)
@@ -732,34 +819,99 @@ def render_script_runners_tab() -> None:
         cmd_str = " ".join(shlex.quote(c) for c in cmd)
         st.write("Command:")
         st.code(cmd_str)
-        # Start asynchronously so it can be terminated
+        # Log run request details
         try:
-            prefix = f"{datetime.now():%Y%m%d-%H%M%S}_{module_name}"
-            info = start_subprocess(cmd, cwd=DASHBOARD_DIR, extra_env=effective_env, log_prefix=prefix)
-        except Exception as e:
-            logging.getLogger("dashboard").exception("Run failed for module %s", module_name)
-            st.error(f"Failed to start subprocess: {e}")
-            return
-        st.session_state["active_run"] = {
-            **info,
-            "module": module_name,
-            "cmd": cmd_str,
-            "detached": bool(detached),
-        }
-        msg = f"Started module '{module_name}' (PID {info['pid']})."
-        if detached:
-            msg += " Running in detached mode; logs are not displayed in the UI."
-        else:
-            msg += " Use 'Terminate Run' to stop and view live logs below."
-        st.success(msg)
-        # Force a rerun so the active run controls appear immediately
-        try:
-            st.rerun()
+            logging.getLogger("dashboard").info(
+                "Run requested: module=%s env=%s mode=%s cmd=%s",
+                module_name,
+                (env_vars.get("CONDA_ENV") or "qf") if env_vars else "qf",
+                "detached" if detached else "sync",
+                cmd_str,
+            )
         except Exception:
+            pass
+        if detached:
+            # Start asynchronously so it can be terminated
             try:
-                st.experimental_rerun()
+                prefix = f"{datetime.now():%Y%m%d-%H%M%S}_{module_name}"
+                info = start_subprocess(cmd, cwd=DASHBOARD_DIR, extra_env=effective_env, log_prefix=prefix)
+            except Exception as e:
+                logging.getLogger("dashboard").exception("Run failed for module %s", module_name)
+                st.error(f"Failed to start subprocess: {e}")
+                return
+            st.session_state["active_run"] = {
+                **info,
+                "module": module_name,
+                "cmd": cmd_str,
+                "detached": True,
+            }
+            # Log start information with PID and log paths
+            try:
+                logging.getLogger("dashboard").info(
+                    "Started run: module=%s pid=%s stdout=%s stderr=%s",
+                    module_name,
+                    info.get("pid"),
+                    info.get("stdout_path"),
+                    info.get("stderr_path"),
+                )
             except Exception:
                 pass
+            st.success(f"Started module '{module_name}' (PID {info['pid']}). Running in detached mode.")
+            # Show initial tail without rerun
+            out_path = info.get("stdout_path")
+            err_path = info.get("stderr_path")
+            if out_path and os.path.exists(out_path):
+                try:
+                    with open(out_path, "r", encoding="utf-8", errors="ignore") as f:
+                        out_lines = f.readlines()[-200:]
+                    st.subheader("Log generation (tail)")
+                    st.text_area("Stdout", value="".join(out_lines) or "(no output yet)", height=300, key=f"initial_tail_{info['pid']}", label_visibility="collapsed")
+                except Exception:
+                    pass
+            if err_path and os.path.exists(err_path):
+                try:
+                    with open(err_path, "r", encoding="utf-8", errors="ignore") as f:
+                        err_lines = f.readlines()[-200:]
+                    if err_lines:
+                        st.subheader("Stderr (tail)")
+                        st.code("".join(err_lines))
+                except Exception:
+                    pass
+        else:
+            # Run synchronously and show output inline
+            try:
+                _t0 = datetime.now()
+                result = run_subprocess(cmd, cwd=DASHBOARD_DIR, extra_env=effective_env)
+            except Exception as e:
+                logging.getLogger("dashboard").exception("Run failed for module %s", module_name)
+                st.error(f"Run failed: {e}")
+                return
+            st.success(f"Run finished (rc={result.returncode}).")
+            try:
+                elapsed = (datetime.now() - _t0).total_seconds()
+                logging.getLogger("dashboard").info(
+                    "Run finished: module=%s rc=%s elapsed=%.3fs",
+                    module_name,
+                    result.returncode,
+                    elapsed,
+                )
+            except Exception:
+                pass
+            if result.stdout:
+                st.subheader("Log generation")
+                st.text_area("Stdout", value=result.stdout, height=400, key=f"final_sync_log_{module_name}", label_visibility="collapsed")
+            if result.stderr:
+                st.subheader("Stderr")
+                st.code(result.stderr)
+            # Append to logs store
+            st.session_state["run_logs"].append({
+                "time": datetime.now().isoformat(timespec="seconds"),
+                "module": module_name,
+                "cmd": cmd_str,
+                "returncode": result.returncode,
+                "stdout": result.stdout or "",
+                "stderr": result.stderr or "",
+            })
 
 
 def render_logs_tab() -> None:
@@ -773,7 +925,7 @@ def render_logs_tab() -> None:
                 st.code(entry["cmd"], language="bash")
                 if entry["stdout"]:
                     st.subheader("Log generation")
-                    st.text_area("", value=entry["stdout"], height=300, key=f"log_{i}")
+                    st.text_area("Stdout", value=entry["stdout"], height=300, key=f"log_{i}", label_visibility="collapsed")
                 if entry["stderr"]:
                     st.subheader("Stderr")
                     st.code(entry["stderr"])
@@ -1112,7 +1264,7 @@ def render_tools_tab() -> None:
                 if err:
                     combined += "\n\nSTDERR:\n" + err
                 with st.expander("Check Environment Output", expanded=True):
-                    st.text_area("", value=combined or "(no output)", height=400, key="check_env_out")
+                    st.text_area("Output", value=combined or "(no output)", height=400, key="check_env_out", label_visibility="collapsed")
 
     st.subheader("Jupyter Notebook")
     st.caption("Start Jupyter Notebook in a chosen conda environment and directory. Environment variables from config.ini are passed to the notebook server.")
@@ -1193,20 +1345,39 @@ def render_tools_tab() -> None:
                             pass
     
     st.caption("Notebook will be started detached; check logs/runs for output.")
+    open_in_browser = st.checkbox(
+        "Open browser on start",
+        value=False,
+        key="nb_open_browser",
+        help="If enabled, Jupyter will attempt to open a browser window when the server starts.")
     start_nb = st.button("Start Jupyter Notebook")
     if start_nb:
         exists, detail = conda_env_exists(conda_env)
         if not exists:
             st.error(f"Conda environment '{conda_env}' not found. Details: {detail}")
         else:
-            # cmd = ["conda", "run", "-n", conda_env, "jupyter", "notebook", "--no-browser"]
+            # Compose Jupyter start command and optionally open browser
             cmd = ["conda", "run", "-n", conda_env, "jupyter", "notebook"]
+            if not open_in_browser:
+                cmd.append("--no-browser")
             try:
                 prefix = f"{datetime.now():%Y%m%d-%H%M%S}_jupyter"
                 start_dir = st.session_state.get("nb_path", nb_path) or DASHBOARD_DIR
                 info = start_subprocess(cmd, cwd=start_dir, extra_env=nb_env_vars, log_prefix=prefix)
                 st.success(f"Jupyter Notebook started (PID {info['pid']}) in '{start_dir}'.")
                 st.caption("Open the printed URL from logs (uploads/logs). If using token authentication, copy token from logs.")
+                try:
+                    logging.getLogger("dashboard").info(
+                        "Jupyter started: env=%s pid=%s cwd=%s open_browser=%s stdout=%s stderr=%s",
+                        conda_env,
+                        info.get("pid"),
+                        start_dir,
+                        bool(open_in_browser),
+                        info.get("stdout_path"),
+                        info.get("stderr_path"),
+                    )
+                except Exception:
+                    pass
             except Exception as e:
                 logging.getLogger("dashboard").exception("Failed to start Jupyter Notebook")
                 st.error(f"Failed to start Jupyter Notebook: {e}")
