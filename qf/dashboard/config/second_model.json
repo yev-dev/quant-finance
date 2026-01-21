@@ -1,0 +1,42 @@
+{
+  "module": "runners.second_model",
+  "description": "Run second_model with optional operation type and simulated duration.",
+  "args": [
+    {
+      "name": "start_date",
+      "flag": "--start-date",
+      "type": "string",
+      "help": "Start date (YYYY-MM-DD)",
+      "value": "2025-01-01"
+    },
+    {
+      "name": "end_date",
+      "flag": "--end-date",
+      "type": "string",
+      "help": "End date (YYYY-MM-DD)",
+      "value": "2025-12-31"
+    },
+    {
+      "name": "operation_type",
+      "flag": "--operation-type",
+      "type": "string",
+      "help": "Optional operation type (e.g., aggregate, train, score)",
+      "value": "aggregate"
+    },
+    {
+      "name": "duration_seconds",
+      "flag": "--duration-seconds",
+      "type": "int",
+      "help": "Simulated run duration in seconds (1-60)",
+      "value": 45
+    }
+  ],
+  "env": {},
+  "run": {
+    "useCondaEnv": "${CONDA_ENV}",
+    "cwd": "${DASHBOARD_DIR}"
+  },
+  "examples": [
+    "python -m runners.second_model --start-date 2025-01-01 --end-date 2025-12-31 --operation-type test --duration-seconds 30"
+  ]
+}

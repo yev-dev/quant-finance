@@ -17,12 +17,14 @@ Notes:
 """
 
 import os
+import json
 import importlib
 import shlex
 import logging
 from logging.handlers import RotatingFileHandler
 from typing import Any, Dict, List
 from datetime import datetime
+from copy import deepcopy
 
 import streamlit as st
 
@@ -145,10 +147,301 @@ def render_script_runners_tab() -> None:
                 )
         else:
             st.info("No argparse parameters detected; module will run without arguments.")
+            st.caption(
+                "Special-case inputs for non-argparse modules (e.g., third_model): "
+                "provide date tokens or environment values."
+            )
+
+    # --- Optional: Config file editor/runner ---
+    # Determine config directory: prefer CONFIG_PATH from selected env; else fallback to bundled config/
+    cfg_path_env = (env_vars or {}).get("CONFIG_PATH", "").strip() if env_vars else ""
+    if cfg_path_env:
+        # Expand ~ and environment variables, then resolve relative paths against dashboard dir
+        expanded = os.path.expanduser(os.path.expandvars(cfg_path_env))
+        config_dir = expanded if os.path.isabs(expanded) else os.path.join(DASHBOARD_DIR, expanded)
+    else:
+        config_dir = os.path.join(DASHBOARD_DIR, "config")
+    config_path = os.path.join(config_dir, f"{module_name}.json")
+    config_data = None
+    generated_from_specs = False
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                config_data = json.load(f)
+        except Exception as e:
+            st.warning(f"Failed to read config for {module_name}: {e}")
+    else:
+        # Dynamically populate a default preset based on the selected module
+        # CONFIG_PATH acts only as the base directory; file name is derived from the module
+        try:
+            if specs:
+                # argparse-backed module: build args list with discovered defaults/help
+                args_list = []
+                for s in specs:
+                    first_flag = s.flags[0] if s.flags else ""
+                    args_list.append({
+                        "name": s.name,
+                        "flag": first_flag,
+                        "type": s.arg_type or "string",
+                        "value": s.default if s.default is not None else "",
+                        "help": s.help_text or "",
+                    })
+                config_data = {
+                    "noArgparse": False,
+                    "args": args_list,
+                    "env": {},
+                }
+            else:
+                # Non-argparse: provide token defaults
+                tokens = ["RUN_DATE", "COB_DATE", "START_DATE", "END_DATE"]
+                config_data = {
+                    "noArgparse": True,
+                    "inputs": {"tokens": tokens},
+                    "defaults": {k: "" for k in tokens},
+                    "passMode": "argv tokens",
+                    "env": {},
+                }
+            generated_from_specs = True
+        except Exception as e:
+            st.warning(f"Failed to generate default config for {module_name}: {e}")
+
+    with st.expander("Config preset (optional)", expanded=False):
+        st.caption("CONFIG_PATH should point to a base directory. The preset file path is derived from the selected module name.")
+        st.caption(f"Config directory: {config_dir}")
+        st.code(config_path)
+        if not os.path.exists(config_dir):
+            st.info("Config directory not found. It will be created when you save.")
+        if config_data is None:
+            st.info("No config file found and no defaults available.")
+            # If CONFIG_PATH is set but a preset exists in bundled fallback, surface a hint
+            if cfg_path_env:
+                fallback_dir = os.path.join(DASHBOARD_DIR, "config")
+                fallback_path = os.path.join(fallback_dir, f"{module_name}.json")
+                if os.path.exists(fallback_path):
+                    st.warning(
+                        "A preset exists in the bundled directory but not under your CONFIG_PATH. "
+                        "Either clear CONFIG_PATH to use the bundled presets or click 'Save Config' to create a copy under CONFIG_PATH.\n\n"
+                        f"Bundled preset found at: {fallback_path}"
+                    )
+        else:
+            if generated_from_specs:
+                st.info("This preset was generated dynamically from the module's parameters. Click 'Save Config' to persist it under CONFIG_PATH.")
+
+            # Working copy in session to support add/remove/edit before saving
+            work_key = f"cfg_work_{module_name}"
+            if work_key not in st.session_state:
+                st.session_state[work_key] = deepcopy(config_data)
+            working = st.session_state[work_key]
+
+            col_reset, _ = st.columns([1, 5])
+            with col_reset:
+                if st.button("Reset preset from file", key="cfg_reset_btn"):
+                    st.session_state[work_key] = deepcopy(config_data)
+                    try:
+                        st.rerun()
+                    except Exception:
+                        try:
+                            st.experimental_rerun()
+                        except Exception:
+                            pass
+
+            no_argparse = bool(working.get("noArgparse"))
+            if not no_argparse:
+                st.subheader("Arguments")
+                if "args" not in working or not isinstance(working.get("args"), list):
+                    working["args"] = []
+                # Add new argument row
+                if st.button("Add argument", key="cfg_add_arg"):
+                    working["args"].append({
+                        "name": "",
+                        "flag": "",
+                        "type": "string",
+                        "value": "",
+                        "help": "",
+                    })
+                    st.session_state[work_key] = working
+                    try:
+                        st.rerun()
+                    except Exception:
+                        try:
+                            st.experimental_rerun()
+                        except Exception:
+                            pass
+                # Render editable rows
+                to_delete = []
+                for i, a in enumerate(list(working.get("args", []))):
+                    col1, col2, col3 = st.columns([3, 2, 1])
+                    with col1:
+                        a_name = st.text_input("name", value=str(a.get("name", "")), key=f"cfg_arg_{i}_name")
+                        a_flag = st.text_input("flag", value=str(a.get("flag", "")), key=f"cfg_arg_{i}_flag")
+                        a_type = st.text_input("type", value=str(a.get("type", "string")), key=f"cfg_arg_{i}_type")
+                    with col2:
+                        a_value = st.text_input("value", value=str(a.get("value", "")), key=f"cfg_arg_{i}_value")
+                        a_help = st.text_input("help", value=str(a.get("help", "")), key=f"cfg_arg_{i}_help")
+                    with col3:
+                        if st.button("Remove", key=f"cfg_arg_{i}_remove"):
+                            to_delete.append(i)
+                    # Apply edits back into working copy
+                    working["args"][i] = {
+                        "name": a_name,
+                        "flag": a_flag,
+                        "type": a_type,
+                        "value": a_value,
+                        "help": a_help,
+                    }
+                for idx in sorted(to_delete, reverse=True):
+                    try:
+                        del working["args"][idx]
+                    except Exception:
+                        pass
+            else:
+                st.subheader("Non-argparse inputs")
+                if "inputs" not in working or not isinstance(working.get("inputs"), dict):
+                    working["inputs"] = {"tokens": ["RUN_DATE", "COB_DATE", "START_DATE", "END_DATE"]}
+                if "defaults" not in working or not isinstance(working.get("defaults"), dict):
+                    working["defaults"] = {k: "" for k in working["inputs"].get("tokens", [])}
+                tokens = list(working.get("inputs", {}).get("tokens", []))
+                tokens_text = st.text_area("Tokens (one per line)", value="\n".join(tokens), height=100, key="cfg_tokens_text")
+                new_tokens = [t.strip() for t in tokens_text.splitlines() if t.strip()]
+                working.setdefault("inputs", {})["tokens"] = new_tokens
+                # Sync defaults with tokens
+                old_defaults = dict(working.get("defaults", {}))
+                new_defaults = {k: old_defaults.get(k, "") for k in new_tokens}
+                for k in new_tokens:
+                    new_defaults[k] = st.text_input(f"default for {k}", value=str(new_defaults.get(k, "")), key=f"cfg_def_{k}")
+                working["defaults"] = new_defaults
+                pm = str(working.get("passMode", "argv tokens"))
+                working["passMode"] = st.radio(
+                    "Pass values as",
+                    ["argv tokens", "environment variables"],
+                    index=0 if pm == "argv tokens" else 1,
+                    key="cfg_pass_mode",
+                )
+
+            st.subheader("Environment overrides (optional)")
+            if "env" not in working or not isinstance(working.get("env"), dict):
+                working["env"] = {}
+            # Existing env entries
+            for k in sorted(list(working["env"].keys())):
+                col_ev1, col_ev2 = st.columns([4, 1])
+                with col_ev1:
+                    val = st.text_input(f"ENV {k}", value=str(working["env"].get(k, "")), key=f"cfg_env_val_{k}")
+                    working["env"][k] = val
+                with col_ev2:
+                    if st.button("Remove", key=f"cfg_env_remove_{k}"):
+                        try:
+                            del working["env"][k]
+                            try:
+                                st.rerun()
+                            except Exception:
+                                try:
+                                    st.experimental_rerun()
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+            # Add new env variable
+            st.markdown("Add new environment variable")
+            col_ne1, col_ne2, col_ne3 = st.columns([2, 2, 1])
+            with col_ne1:
+                new_env_key = st.text_input("Key", value="", key="cfg_env_new_key")
+            with col_ne2:
+                new_env_val = st.text_input("Value", value="", key="cfg_env_new_val")
+            with col_ne3:
+                if st.button("Add", key="cfg_env_add"):
+                    if new_env_key.strip():
+                        working["env"][new_env_key.strip()] = new_env_val
+                        st.session_state["cfg_env_new_key"] = ""
+                        st.session_state["cfg_env_new_val"] = ""
+                        try:
+                            st.rerun()
+                        except Exception:
+                            try:
+                                st.experimental_rerun()
+                            except Exception:
+                                pass
+
+            # Persist working copy back into session and provide actions
+            st.session_state[work_key] = working
+
+            col_s, col_r = st.columns(2)
+            with col_s:
+                if st.button("Save Config", key="cfg_save_btn"):
+                    try:
+                        os.makedirs(config_dir, exist_ok=True)
+                        with open(config_path, "w", encoding="utf-8") as f:
+                            json.dump(working, f, indent=2)
+                        st.success("Config saved.")
+                    except Exception as e:
+                        st.error(f"Failed to save config: {e}")
+            with col_r:
+                if st.button("Run with Config", key="cfg_run_btn"):
+                    # Build command/env from working copy
+                    conda_env_cfg = (get_env_for(st.session_state["selected_env"]).get("CONDA_ENV") or "qf").strip()
+                    ok, detail = conda_env_exists(conda_env_cfg)
+                    if not ok:
+                        st.error(f"Conda environment '{conda_env_cfg}' not found. Details: {detail}")
+                    else:
+                        effective_env_cfg = dict(get_env_for(st.session_state["selected_env"]))
+                        if working.get("env"):
+                            effective_env_cfg.update({k: str(v) for k, v in working.get("env", {}).items()})
+                        if not working.get("noArgparse"):
+                            cfg_values = {}
+                            for a in working.get("args", []):
+                                name = str(a.get("name", "")).strip()
+                                if name:
+                                    cfg_values[name] = a.get("value")
+                            cmd_cfg = build_command(module_name, specs, cfg_values, conda_env_name=conda_env_cfg)
+                        else:
+                            cmd_cfg = [
+                                "conda", "run", "-n", conda_env_cfg, "python", "-m", f"runners.{module_name}"
+                            ]
+                            defaults = working.get("defaults", {})
+                            provided = {k: v for k, v in defaults.items() if str(v).strip()}
+                            if working.get("passMode", "argv tokens") == "argv tokens":
+                                for k, v in provided.items():
+                                    cmd_cfg.append(f"{k}:{v}")
+                            else:
+                                effective_env_cfg.update(provided)
+                        cmd_str_cfg = " ".join(shlex.quote(c) for c in cmd_cfg)
+                        st.write("Command (config):")
+                        st.code(cmd_str_cfg)
+                        try:
+                            prefix = f"{datetime.now():%Y%m%d-%H%M%S}_{module_name}_cfg"
+                            info = start_subprocess(cmd_cfg, cwd=DASHBOARD_DIR, extra_env=effective_env_cfg, log_prefix=prefix)
+                        except Exception as e:
+                            logging.getLogger("dashboard").exception("Run with config failed for module %s", module_name)
+                            st.error(f"Failed to start subprocess: {e}")
+                        else:
+                            st.session_state["active_run"] = {**info, "module": module_name, "cmd": cmd_str_cfg}
+                            st.success(f"Started module '{module_name}' from config (PID {info['pid']}).")
+                            try:
+                                st.rerun()
+                            except Exception:
+                                try:
+                                    st.experimental_rerun()
+                                except Exception:
+                                    pass
 
     st.subheader("Inputs")
     with st.form("params_form"):
         values = render_inputs(specs)
+        # Special-case UI when no argparse is present: collect tokens/env values
+        run_date = cob_date = start_date = end_date = ""
+        pass_mode = "argv tokens"
+        if not specs:
+            st.markdown("#### Non-argparse inputs (optional)")
+            st.caption("Any string formats are accepted; values are concatenated and separated with ':' by the module.")
+            run_date = st.text_input("RUN_DATE (any format)", value="", placeholder="e.g., 2025/01/01 or Jan-01-2025")
+            cob_date = st.text_input("COB_DATE (any format)", value="", placeholder="e.g., 2025/01/02 or Jan-02-2025")
+            start_date = st.text_input("START_DATE (any format)", value="", placeholder="e.g., 2025.01.01")
+            end_date = st.text_input("END_DATE (any format)", value="", placeholder="e.g., 2025_12_31")
+            pass_mode = st.radio(
+                "Pass values as",
+                ["argv tokens", "environment variables"],
+                index=0,
+                help="Tokens are passed as NAME:VALUE on argv; env vars set RUN_DATE, COB_DATE, START_DATE, END_DATE",
+            )
         run_btn = st.form_submit_button("Run Module")
 
     # Show active run section if any
@@ -163,6 +456,14 @@ def render_script_runners_tab() -> None:
                 if st.button("Terminate Run", key="terminate_btn"):
                     terminate_process(pid)
                     st.success("Termination signal sent.")
+                    # Immediately refresh UI so the running status updates
+                    try:
+                        st.rerun()
+                    except Exception:
+                        try:
+                            st.experimental_rerun()
+                        except Exception:
+                            pass
             with col2:
                 st.caption("Live output (tail)")
                 # Tail stdout/stderr if available
@@ -226,13 +527,31 @@ def render_script_runners_tab() -> None:
             st.error(f"Conda environment '{conda_env}' not found. Details: {detail}")
             return
         cmd = build_command(module_name, specs, values, conda_env_name=conda_env)
+        # If no argparse specs, optionally pass tokens/env values for non-argparse modules
+        effective_env = dict(env_vars)
+        if not specs:
+            provided = {
+                "RUN_DATE": run_date.strip(),
+                "COB_DATE": cob_date.strip(),
+                "START_DATE": start_date.strip(),
+                "END_DATE": end_date.strip(),
+            }
+            provided = {k: v for k, v in provided.items() if v}
+            if provided:
+                if pass_mode == "argv tokens":
+                    # Append NAME:VALUE tokens to the command
+                    for k, v in provided.items():
+                        cmd.append(f"{k}:{v}")
+                else:
+                    # Inject as environment variables
+                    effective_env.update(provided)
         cmd_str = " ".join(shlex.quote(c) for c in cmd)
         st.write("Command:")
         st.code(cmd_str)
         # Start asynchronously so it can be terminated
         try:
             prefix = f"{datetime.now():%Y%m%d-%H%M%S}_{module_name}"
-            info = start_subprocess(cmd, cwd=DASHBOARD_DIR, extra_env=env_vars, log_prefix=prefix)
+            info = start_subprocess(cmd, cwd=DASHBOARD_DIR, extra_env=effective_env, log_prefix=prefix)
         except Exception as e:
             logging.getLogger("dashboard").exception("Run failed for module %s", module_name)
             st.error(f"Failed to start subprocess: {e}")
@@ -243,6 +562,14 @@ def render_script_runners_tab() -> None:
             "cmd": cmd_str,
         }
         st.success(f"Started module '{module_name}' (PID {info['pid']}). Use 'Terminate Run' to stop.")
+        # Force a rerun so the active run controls appear immediately
+        try:
+            st.rerun()
+        except Exception:
+            try:
+                st.experimental_rerun()
+            except Exception:
+                pass
 
 
 def render_logs_tab() -> None:
@@ -355,13 +682,37 @@ def render_reconciliation_tab() -> None:
     except Exception:
         pass
 
+    # Available environments from config.ini (used to prepopulate directories via RESULT_PATH)
+    envs = list_env_names() or ["DEV", "UAT", "PROD"]
+    current_env = st.session_state.get("selected_env", envs[0])
+
     mode = st.radio("Mode", ["Directories", "Files"], horizontal=True)
     key = st.text_input("Reconciliation key (CSV column)", value="id")
     fields_raw = st.text_input("Optional fields to compare (comma-separated)", value="")
     fields = [f.strip() for f in fields_raw.split(",") if f.strip()] or None
 
     if mode == "Directories":
-        before_dir = st.text_input("Before directory", value="", placeholder="/path/to/before/")
+        # Optional single preset env (applies to both BEFORE and AFTER) using RESULT_PATH
+        envs_with_resultpath = [e for e in envs if get_env_for(e).get("RESULT_PATH")]
+        preset_env_choice = st.selectbox(
+            "Preset Env (Before & After)",
+            options=["(none)"] + envs_with_resultpath,
+            index=0,
+            help="Select an environment; its RESULT_PATH will prepopulate both directories",
+        )
+        if preset_env_choice != "(none)":
+            cfg = get_env_for(preset_env_choice)
+            rp = cfg.get("RESULT_PATH")
+            if rp:
+                st.session_state["recon_before_dir"] = rp
+                st.session_state["recon_after_dir"] = rp
+                st.session_state["browse_before_dir_active"] = False
+                st.session_state["browse_after_dir_active"] = False
+        before_dir = st.text_input(
+            "Before directory",
+            value=st.session_state.get("recon_before_dir", ""),
+            placeholder="/path/to/before/",
+        )
         col_b1, col_b2 = st.columns([1, 3])
         with col_b1:
             if st.button("Browse Before dir", key="browse_before_dir_btn"):
@@ -386,7 +737,11 @@ def render_reconciliation_tab() -> None:
                     st.session_state["recon_before_dir"] = st.session_state.get("browse_before_dir_root", DASHBOARD_DIR)
                     before_dir = st.session_state["recon_before_dir"]
 
-        after_dir = st.text_input("After directory", value="", placeholder="/path/to/after/")
+        after_dir = st.text_input(
+            "After directory",
+            value=st.session_state.get("recon_after_dir", ""),
+            placeholder="/path/to/after/",
+        )
         col_a1, col_a2 = st.columns([1, 3])
         with col_a1:
             if st.button("Browse After dir", key="browse_after_dir_btn"):

@@ -1,0 +1,28 @@
+{
+  "module": "runners.first_model",
+  "description": "Run first_model over a date range.",
+  "args": [
+    {
+      "name": "start_date",
+      "flag": "--start-date",
+      "type": "string",
+      "help": "Start date (YYYY-MM-DD)",
+      "value": "2025-01-01"
+    },
+    {
+      "name": "end_date",
+      "flag": "--end-date",
+      "type": "string",
+      "help": "End date (YYYY-MM-DD)",
+      "value": "2025-12-31"
+    }
+  ],
+  "env": {},
+  "run": {
+    "useCondaEnv": "${CONDA_ENV}",
+    "cwd": "${DASHBOARD_DIR}"
+  },
+  "examples": [
+    "python -m runners.first_model --start-date 2025-01-01 --end-date 2025-12-31"
+  ]
+}

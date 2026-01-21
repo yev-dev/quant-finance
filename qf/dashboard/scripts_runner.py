@@ -221,18 +221,21 @@ def ensure_default_env_config() -> None:
         "API_KEY": "dev-key",
         "LOG_LEVEL": "INFO",
         "CONDA_ENV": CONDA_ENV_NAME,
+        "CONFIG_PATH": "",
     }
     cp["UAT"] = {
         "API_URL": "https://uat.api.example.com",
         "API_KEY": "uat-key",
         "LOG_LEVEL": "INFO",
         "CONDA_ENV": CONDA_ENV_NAME,
+        "CONFIG_PATH": "",
     }
     cp["PROD"] = {
         "API_URL": "https://api.example.com",
         "API_KEY": "prod-key",
         "LOG_LEVEL": "WARNING",
         "CONDA_ENV": CONDA_ENV_NAME,
+        "CONFIG_PATH": "",
     }
     with open(cfg_path, "w", encoding="utf-8") as f:
         cp.write(f)
