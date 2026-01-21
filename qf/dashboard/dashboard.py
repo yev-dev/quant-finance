@@ -232,7 +232,8 @@ def render_script_runners_tab() -> None:
     # Dynamically create a nested path under the configured directory for this module
     # e.g., <CONFIG_PATH>/<module_name>/<module_name>.json
     config_dir = os.path.join(base_config_dir, module_name)
-    config_path = os.path.join(config_dir, f"{module_name}.json")
+    # Use a _config suffix for module config filenames to avoid name clashes
+    config_path = os.path.join(config_dir, f"{module_name}_config.json")
     config_data = None
     generated_from_specs = False
     if os.path.exists(config_path):
@@ -306,7 +307,7 @@ def render_script_runners_tab() -> None:
             # If CONFIG_PATH is set but a preset exists in bundled fallback, surface a hint
             if cfg_path_env:
                 fallback_dir = os.path.join(DASHBOARD_DIR, "config")
-                fallback_path = os.path.join(fallback_dir, f"{module_name}.json")
+                fallback_path = os.path.join(fallback_dir, f"{module_name}_config.json")
                 if os.path.exists(fallback_path):
                     st.warning(
                         "A preset exists in the bundled directory but not under your CONFIG_PATH. "
