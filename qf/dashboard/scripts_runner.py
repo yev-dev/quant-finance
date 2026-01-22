@@ -530,26 +530,66 @@ def conda_env_exists(env_name: str) -> Tuple[bool, str]:
         return False, "Failed to parse conda JSON output"
 
 
+def _python_executable_for_env(env_name: str) -> Optional[str]:
+    """Resolve the Python executable path for a given conda environment name.
+
+    Returns an absolute path or None if resolution fails.
+    """
+    ok, detail = conda_env_exists(env_name)
+    if not ok or not detail:
+        return None
+    env_path = str(detail)
+    # Prefer typical locations
+    candidates = [
+        os.path.join(env_path, "bin", "python"),                # Unix-like
+        os.path.join(env_path, "python.exe"),                     # Windows root
+        os.path.join(env_path, "Scripts", "python.exe"),         # Windows Scripts
+    ]
+    for p in candidates:
+        try:
+            if os.path.exists(p) and os.access(p, os.X_OK):
+                return p
+        except Exception:
+            continue
+    return None
+
+
 def build_command(
     module_name: str,
     specs: List[ArgSpec],
     values: Dict[str, Any],
     conda_env_name: Optional[str] = None,
+    backend: str = "conda",
 ) -> List[str]:
-    """Build a conda-run command to run a module from the runners package in the desired env.
+    """Build a command to run a module from the runners package in the desired env.
 
-    If conda_env_name is None, defaults to CONDA_ENV_NAME.
+    backends:
+      - "conda": use `conda run -n <env> python -m <package.module>`
+      - "python": resolve the env's Python interpreter path and run `python -m <package.module>` directly
     """
     env_name = (conda_env_name or CONDA_ENV_NAME).strip()
-    cmd: List[str] = [
-        "conda",
-        "run",
-        "-n",
-        env_name,
-        "python",
-        "-m",
-        f"{RUNNERS_PACKAGE}.{module_name}",
-    ]
+    backend = (backend or "conda").strip().lower()
+    if backend == "python":
+        pyexe = _python_executable_for_env(env_name)
+        if pyexe:
+            cmd: List[str] = [
+                pyexe,
+                "-m",
+                f"{RUNNERS_PACKAGE}.{module_name}",
+            ]
+        else:
+            # Fallback to conda backend if interpreter resolution fails
+            backend = "conda"
+    if backend == "conda":
+        cmd = [
+            "conda",
+            "run",
+            "-n",
+            env_name,
+            "python",
+            "-m",
+            f"{RUNNERS_PACKAGE}.{module_name}",
+        ]
     # Positional first in encounter order
     for spec in specs:
         val = values.get(spec.name)
@@ -633,6 +673,15 @@ def start_subprocess(
     # Open files and launch process; child inherits FDs, safe to close in parent after spawn
     with open(stdout_path, "w", encoding="utf-8") as out, open(stderr_path, "w", encoding="utf-8") as err:
         try:
+            # Hint child process to attach logging to these files
+            try:
+                env["DASHBOARD_CHILD_LOG_STDOUT"] = stdout_path
+                env["DASHBOARD_CHILD_LOG_STDERR"] = stderr_path
+                # Prefer LOG_LEVEL from extra_env; default INFO
+                level = (extra_env or {}).get("LOG_LEVEL") if extra_env else None
+                env["DASHBOARD_CHILD_LOG_LEVEL"] = str(level or "INFO").upper()
+            except Exception:
+                pass
             p = subprocess.Popen(
                 cmd,
                 cwd=cwd,

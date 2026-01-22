@@ -47,6 +47,7 @@ from scripts_runner import (
     _get_streamlit_config,
     set_runners_source_from_env,
     set_runners_package,
+    ACTIVE_PROCS,
 )
 
 # Point to the runners directory (one level down from this file)
@@ -58,6 +59,16 @@ HOME_LOG_DIR = os.path.join(os.path.expanduser("~"), ".dashboard", "logs")
 LOG_DIR = HOME_LOG_DIR
 LOG_FILE = os.path.join(LOG_DIR, "dashboard.log")
 UPLOADS_DIR = os.path.join(DASHBOARD_DIR, "uploads")
+
+def _next_ui_key(prefix: str) -> str:
+    """Return a unique Streamlit widget key for this session using a counter."""
+    try:
+        st.session_state.setdefault("_ui_key_counter", 0)
+        st.session_state["_ui_key_counter"] += 1
+        return f"{prefix}_{st.session_state['_ui_key_counter']}"
+    except Exception:
+        # Fallback to time-based key if session state isn't available
+        return f"{prefix}_{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
 def setup_logging() -> None:
     os.makedirs(LOG_DIR, exist_ok=True)
     logger = logging.getLogger()
@@ -187,6 +198,16 @@ def render_script_runners_tab() -> None:
         set_runners_source_from_env(conda_env_for_pkg, runners_pkg)
     except Exception:
         pass
+
+    # Runner backend selection
+    st.subheader("Runner backend")
+    backend_options = {
+        "Conda (by name)": "conda",
+        "Interpreter path (env python)": "python",
+    }
+    default_backend_key = next((k for k, v in backend_options.items() if v == st.session_state.get("runner_backend", "conda")), "Conda (by name)")
+    chosen_backend_key = st.selectbox("Backend", options=list(backend_options.keys()), index=list(backend_options.keys()).index(default_backend_key))
+    st.session_state["runner_backend"] = backend_options[chosen_backend_key]
 
     modules = list_runner_modules()
     if not modules:
@@ -488,7 +509,7 @@ def render_script_runners_tab() -> None:
                                 name = str(a.get("name", "")).strip()
                                 if name:
                                     cfg_values[name] = a.get("value")
-                            cmd_cfg = build_command(module_name, specs, cfg_values, conda_env_name=conda_env_cfg)
+                            cmd_cfg = build_command(module_name, specs, cfg_values, conda_env_name=conda_env_cfg, backend=st.session_state.get("runner_backend", "conda"))
                         else:
                             rpkg = runners_pkg
                             cmd_cfg = [
@@ -531,11 +552,8 @@ def render_script_runners_tab() -> None:
                                     cfg_values[name] = a.get("value")
                             cmd_cfg = build_command(module_name, specs, cfg_values, conda_env_name=conda_env_cfg)
                         else:
-                            # Use configured runners package for module execution
-                            rpkg = runners_pkg
-                            cmd_cfg = [
-                                "conda", "run", "-n", conda_env_cfg, "python", "-m", f"{rpkg}.{module_name}"
-                            ]
+                            # Build base command according to backend
+                            cmd_cfg = build_command(module_name, [], {}, conda_env_name=conda_env_cfg, backend=st.session_state.get("runner_backend", "conda"))
                             defaults = working.get("defaults", {})
                             provided = {k: v for k, v in defaults.items() if str(v).strip()}
                             if working.get("passMode", "argv tokens") == "argv tokens":
@@ -577,26 +595,29 @@ def render_script_runners_tab() -> None:
                                 except Exception:
                                     pass
                                 st.success(f"Started module '{module_name}' from config (PID {info['pid']}). Running in detached mode.")
-                                # Show initial tail without rerun
+                                # Show initial tail without rerun (combine stdout + stderr in Log generation)
                                 out_path = info.get("stdout_path")
                                 err_path = info.get("stderr_path")
-                                if out_path and os.path.exists(out_path):
-                                    try:
+                                st.subheader("Log generation (tail)")
+                                combined_tail = ""
+                                try:
+                                    if out_path and os.path.exists(out_path):
                                         with open(out_path, "r", encoding="utf-8", errors="ignore") as f:
                                             out_lines = f.readlines()[-200:]
-                                        st.subheader("Log generation (tail)")
-                                        st.text_area("Stdout", value="".join(out_lines) or "(no output yet)", height=300, key=f"initial_cfg_tail_{info['pid']}", label_visibility="collapsed")
-                                    except Exception:
-                                        pass
-                                if err_path and os.path.exists(err_path):
-                                    try:
+                                        combined_tail += "".join(out_lines)
+                                except Exception:
+                                    pass
+                                try:
+                                    if err_path and os.path.exists(err_path):
                                         with open(err_path, "r", encoding="utf-8", errors="ignore") as f:
                                             err_lines = f.readlines()[-200:]
                                         if err_lines:
-                                            st.subheader("Stderr (tail)")
-                                            st.code("".join(err_lines))
-                                    except Exception:
-                                        pass
+                                            if combined_tail:
+                                                combined_tail += "\n\nSTDERR (tail):\n"
+                                            combined_tail += "".join(err_lines)
+                                except Exception:
+                                    pass
+                                st.text_area("Stdout", value=combined_tail or "(no output yet)", height=300, key=f"initial_cfg_tail_{info['pid']}", label_visibility="collapsed")
                         else:
                             # Run synchronously and show outputs inline
                             try:
@@ -617,12 +638,13 @@ def render_script_runners_tab() -> None:
                                     )
                                 except Exception:
                                     pass
-                                if result.stdout:
-                                    st.subheader("Log generation")
-                                    st.text_area("Stdout", value=result.stdout, height=400, key=f"final_sync_cfg_log_{module_name}", label_visibility="collapsed")
+                                combined = (result.stdout or "")
                                 if result.stderr:
-                                    st.subheader("Stderr")
-                                    st.code(result.stderr)
+                                    if combined:
+                                        combined += "\n\nSTDERR:\n"
+                                    combined += result.stderr
+                                st.subheader("Log generation")
+                                st.text_area("Stdout", value=combined or "(no output)", height=400, key=_next_ui_key(f"final_sync_cfg_log_{module_name}"), label_visibility="collapsed")
                                 st.session_state["run_logs"].append({
                                     "time": datetime.now().isoformat(timespec="seconds"),
                                     "module": module_name,
@@ -668,7 +690,7 @@ def render_script_runners_tab() -> None:
         if not exists:
             st.error(f"Conda environment '{conda_env}' not found. Details: {detail}")
         else:
-            cmd = build_command(module_name, specs, values, conda_env_name=conda_env)
+            cmd = build_command(module_name, specs, values, conda_env_name=conda_env, backend=st.session_state.get("runner_backend", "conda"))
             # If no argparse specs, optionally pass tokens/env values for non-argparse modules
             effective_env = dict(env_vars)
             provided = {}
@@ -716,16 +738,16 @@ def render_script_runners_tab() -> None:
                         except Exception:
                             pass
             with col2:
-                # Show logs (tail) regardless of detach mode
+                # Show logs (tail) regardless of detach mode; combine or separate per preference
                 st.caption("Log generation (tail)")
-                # Tail stdout/stderr if available
                 out_path = active.get("stdout_path")
                 err_path = active.get("stderr_path")
+                combined_tail = ""
                 try:
                     if out_path and os.path.exists(out_path):
                         with open(out_path, "r", encoding="utf-8", errors="ignore") as f:
                             out_lines = f.readlines()[-200:]
-                        st.text_area("Stdout", value="".join(out_lines) or "(no output yet)", height=300, key=f"live_log_{pid}", label_visibility="collapsed")
+                        combined_tail += "".join(out_lines)
                 except Exception:
                     pass
                 try:
@@ -733,10 +755,12 @@ def render_script_runners_tab() -> None:
                         with open(err_path, "r", encoding="utf-8", errors="ignore") as f:
                             err_lines = f.readlines()[-200:]
                         if err_lines:
-                            st.subheader("Stderr (tail)")
-                            st.code("".join(err_lines))
+                            if combined_tail:
+                                combined_tail += "\n\nSTDERR (tail):\n"
+                            combined_tail += "".join(err_lines)
                 except Exception:
                     pass
+                st.text_area("Stdout", value=combined_tail or "(no output yet)", height=300, key=f"live_log_{pid}", label_visibility="collapsed")
         else:
             # Finished; record log entry and clear active
             rc = status.get("returncode")
@@ -783,12 +807,15 @@ def render_script_runners_tab() -> None:
                 "stderr": err_text,
             })
             # Show outputs once (unless run was detached)
-            if out_text and not active.get("detached"):
+            # Show once (unless run was detached), combined or separate per preference
+            if not active.get("detached"):
+                combined = out_text or ""
+                if err_text:
+                    if combined:
+                        combined += "\n\nSTDERR:\n"
+                    combined += err_text
                 st.subheader("Log generation")
-                st.text_area("Stdout", value=out_text, height=400, key=f"final_log_{pid}", label_visibility="collapsed")
-            if err_text:
-                st.subheader("Stderr")
-                st.code(err_text)
+                st.text_area("Stdout", value=combined or "(no output)", height=400, key=f"final_log_{pid}", label_visibility="collapsed")
             st.session_state["active_run"] = None
 
     if run_btn and not st.session_state.get("active_run"):
@@ -797,7 +824,7 @@ def render_script_runners_tab() -> None:
         if not exists:
             st.error(f"Conda environment '{conda_env}' not found. Details: {detail}")
             return
-        cmd = build_command(module_name, specs, values, conda_env_name=conda_env)
+        cmd = build_command(module_name, specs, values, conda_env_name=conda_env, backend=st.session_state.get("runner_backend", "conda"))
         # If no argparse specs, optionally pass tokens/env values for non-argparse modules
         effective_env = dict(env_vars)
         if not specs:
@@ -860,23 +887,24 @@ def render_script_runners_tab() -> None:
             # Show initial tail without rerun
             out_path = info.get("stdout_path")
             err_path = info.get("stderr_path")
-            if out_path and os.path.exists(out_path):
-                try:
+            # Show combined stdout + stderr tail
+            try:
+                combined_tail = ""
+                if out_path and os.path.exists(out_path):
                     with open(out_path, "r", encoding="utf-8", errors="ignore") as f:
                         out_lines = f.readlines()[-200:]
-                    st.subheader("Log generation (tail)")
-                    st.text_area("Stdout", value="".join(out_lines) or "(no output yet)", height=300, key=f"initial_tail_{info['pid']}", label_visibility="collapsed")
-                except Exception:
-                    pass
-            if err_path and os.path.exists(err_path):
-                try:
+                    combined_tail += "".join(out_lines)
+                if err_path and os.path.exists(err_path):
                     with open(err_path, "r", encoding="utf-8", errors="ignore") as f:
                         err_lines = f.readlines()[-200:]
                     if err_lines:
-                        st.subheader("Stderr (tail)")
-                        st.code("".join(err_lines))
-                except Exception:
-                    pass
+                        if combined_tail:
+                            combined_tail += "\n\nSTDERR (tail):\n"
+                        combined_tail += "".join(err_lines)
+                st.subheader("Log generation (tail)")
+                st.text_area("Stdout", value=combined_tail or "(no output yet)", height=300, key=f"initial_tail_{info['pid']}", label_visibility="collapsed")
+            except Exception:
+                pass
         else:
             # Run synchronously and show output inline
             try:
@@ -897,12 +925,21 @@ def render_script_runners_tab() -> None:
                 )
             except Exception:
                 pass
-            if result.stdout:
+            if st.session_state.get("combine_stderr", True):
+                combined = (result.stdout or "")
+                if result.stderr:
+                    if combined:
+                        combined += "\n\nSTDERR:\n"
+                    combined += result.stderr
                 st.subheader("Log generation")
-                st.text_area("Stdout", value=result.stdout, height=400, key=f"final_sync_log_{module_name}", label_visibility="collapsed")
-            if result.stderr:
-                st.subheader("Stderr")
-                st.code(result.stderr)
+                st.text_area("Stdout", value=combined or "(no output)", height=400, key=_next_ui_key(f"final_sync_log_{module_name}"), label_visibility="collapsed")
+            else:
+                if result.stdout:
+                    st.subheader("Log generation")
+                    st.text_area("Stdout", value=result.stdout, height=400, key=_next_ui_key(f"final_sync_log_{module_name}"), label_visibility="collapsed")
+                if result.stderr:
+                    st.subheader("Stderr")
+                    st.code(result.stderr)
             # Append to logs store
             st.session_state["run_logs"].append({
                 "time": datetime.now().isoformat(timespec="seconds"),
@@ -913,9 +950,8 @@ def render_script_runners_tab() -> None:
                 "stderr": result.stderr or "",
             })
 
-
-def render_logs_tab() -> None:
-    st.header("Run Logs")
+    # --- Historical Run Logs (moved from Logs tab) ---
+    st.subheader("Run Logs")
     logs = list(st.session_state.get("run_logs", []))
     if not logs:
         st.info("No runs yet.")
@@ -923,17 +959,22 @@ def render_logs_tab() -> None:
         for i, entry in enumerate(reversed(logs), 1):
             with st.expander(f"[{i}] {entry['time']} • {entry['module']} • rc={entry['returncode']}"):
                 st.code(entry["cmd"], language="bash")
-                if entry["stdout"]:
-                    st.subheader("Log generation")
-                    st.text_area("Stdout", value=entry["stdout"], height=300, key=f"log_{i}", label_visibility="collapsed")
-                if entry["stderr"]:
-                    st.subheader("Stderr")
-                    st.code(entry["stderr"])
+                combined = entry.get("stdout", "")
+                err = entry.get("stderr", "")
+                if err:
+                    if combined:
+                        combined += "\n\nSTDERR:\n"
+                    combined += err
+                st.subheader("Log generation")
+                st.text_area("Stdout", value=combined or "(no output)", height=300, key=_next_ui_key("hist_log"), label_visibility="collapsed")
     if st.button("Clear Logs"):
         st.session_state["run_logs"] = []
         st.success("Logs cleared.")
 
-    # Show tail of persistent log file (optional)
+
+def render_logs_tab() -> None:
+    st.header("Logs")
+    # Only show the tail of the dashboard log file in this tab
     st.subheader("Dashboard Log (tail)")
     try:
         if os.path.exists(LOG_FILE):
@@ -1366,6 +1407,16 @@ def render_tools_tab() -> None:
                 info = start_subprocess(cmd, cwd=start_dir, extra_env=nb_env_vars, log_prefix=prefix)
                 st.success(f"Jupyter Notebook started (PID {info['pid']}) in '{start_dir}'.")
                 st.caption("Open the printed URL from logs (uploads/logs). If using token authentication, copy token from logs.")
+                # Track active Jupyter session to enable termination and live tails
+                try:
+                    st.session_state["active_jupyter"] = {
+                        **info,
+                        "cmd": " ".join(shlex.quote(c) for c in cmd),
+                        "cwd": start_dir,
+                        "detached": True,
+                    }
+                except Exception:
+                    pass
                 try:
                     logging.getLogger("dashboard").info(
                         "Jupyter started: env=%s pid=%s cwd=%s open_browser=%s stdout=%s stderr=%s",
@@ -1381,6 +1432,220 @@ def render_tools_tab() -> None:
             except Exception as e:
                 logging.getLogger("dashboard").exception("Failed to start Jupyter Notebook")
                 st.error(f"Failed to start Jupyter Notebook: {e}")
+
+    # --- Terminal Script Runner ---
+    st.subheader("Terminal Script")
+    st.caption("Run any shell command in a chosen directory. Optionally run inside the selected conda environment.")
+    term_envs = list_env_names() or ["DEV", "UAT", "PROD"]
+    if st.session_state.get("selected_env") not in term_envs:
+        st.session_state["selected_env"] = term_envs[0]
+    term_env = st.selectbox(
+        "Environment",
+        term_envs,
+        index=term_envs.index(st.session_state["selected_env"]),
+        key="tools_terminal_env_select",
+    )
+    st.session_state["selected_env"] = term_env
+    term_env_vars = get_env_for(term_env)
+    term_conda_env = term_env_vars.get("CONDA_ENV") or "qf"
+    run_in_conda = st.checkbox("Run in conda env", value=True, help="Wrap the command with 'conda run -n <env> bash -lc'.")
+    # Command and working directory
+    cmd_key = "terminal_cmd"
+    cwd_key = "terminal_cwd"
+    default_cmd = st.session_state.get(cmd_key, "echo Hello from terminal")
+    default_cwd = st.session_state.get(cwd_key, DASHBOARD_DIR)
+    user_cmd = st.text_input("Command", value=default_cmd, key=cmd_key)
+    term_cwd = st.text_input("Working directory", value=default_cwd, key=cwd_key)
+    start_term = st.button("Run in Terminal")
+    if start_term:
+        try:
+            if run_in_conda:
+                exists, detail = conda_env_exists(term_conda_env)
+                if not exists:
+                    st.error(f"Conda environment '{term_conda_env}' not found. Details: {detail}")
+                else:
+                    cmd = ["conda", "run", "-n", term_conda_env, "bash", "-lc", user_cmd]
+            else:
+                cmd = ["bash", "-lc", user_cmd]
+            prefix = f"{datetime.now():%Y%m%d-%H%M%S}_terminal"
+            info = start_subprocess(cmd, cwd=term_cwd or DASHBOARD_DIR, extra_env=term_env_vars, log_prefix=prefix)
+        except Exception as e:
+            logging.getLogger("dashboard").exception("Failed to start terminal command")
+            st.error(f"Failed to start command: {e}")
+        else:
+            st.success(f"Terminal command started (PID {info['pid']}) in '{term_cwd or DASHBOARD_DIR}'.")
+            try:
+                st.session_state["active_terminal"] = {
+                    **info,
+                    "cmd": user_cmd,
+                    "cwd": term_cwd or DASHBOARD_DIR,
+                    "detached": True,
+                }
+            except Exception:
+                pass
+            # Initial tail combined/separate
+            out_path = info.get("stdout_path")
+            err_path = info.get("stderr_path")
+            st.subheader("Log generation (tail)")
+            combined_tail = ""
+            try:
+                if out_path and os.path.exists(out_path):
+                    with open(out_path, "r", encoding="utf-8", errors="ignore") as f:
+                        out_lines = f.readlines()[-200:]
+                    combined_tail += "".join(out_lines)
+            except Exception:
+                pass
+            try:
+                if err_path and os.path.exists(err_path):
+                    with open(err_path, "r", encoding="utf-8", errors="ignore") as f:
+                        err_lines = f.readlines()[-200:]
+                    if err_lines:
+                        if combined_tail:
+                            combined_tail += "\n\nSTDERR (tail):\n"
+                        combined_tail += "".join(err_lines)
+            except Exception:
+                pass
+            st.text_area("Stdout", value=combined_tail or "(no output yet)", height=300, key=_next_ui_key("initial_terminal_tail"), label_visibility="collapsed")
+
+    # Active terminal section
+    if st.session_state.get("active_terminal"):
+        at = st.session_state["active_terminal"]
+        pid = at.get("pid")
+        st.subheader("Active Terminal Command")
+        status = get_status(pid)
+        if status.get("running"):
+            st.info(f"Command is running (PID {pid}).")
+            col_tt1, col_tt2 = st.columns([1, 3])
+            with col_tt1:
+                if st.button("Terminate Command", key="terminate_terminal_btn"):
+                    terminate_process(pid)
+                    st.success("Termination signal sent.")
+                    try:
+                        st.rerun()
+                    except Exception:
+                        try:
+                            st.experimental_rerun()
+                        except Exception:
+                            pass
+            with col_tt2:
+                st.caption("Log generation (tail)")
+                out_path = at.get("stdout_path")
+                err_path = at.get("stderr_path")
+                combined_tail = ""
+                try:
+                    if out_path and os.path.exists(out_path):
+                        with open(out_path, "r", encoding="utf-8", errors="ignore") as f:
+                            out_lines = f.readlines()[-200:]
+                        combined_tail += "".join(out_lines)
+                except Exception:
+                    pass
+                try:
+                    if err_path and os.path.exists(err_path):
+                        with open(err_path, "r", encoding="utf-8", errors="ignore") as f:
+                            err_lines = f.readlines()[-200:]
+                        if err_lines:
+                            if combined_tail:
+                                combined_tail += "\n\nSTDERR (tail):\n"
+                            combined_tail += "".join(err_lines)
+                except Exception:
+                    pass
+                st.text_area("Stdout", value=combined_tail or "(no output yet)", height=300, key=_next_ui_key("live_terminal_tail"), label_visibility="collapsed")
+        else:
+            st.success(f"Command finished (rc={status.get('returncode')}).")
+            st.session_state["active_terminal"] = None
+    # Show Active Jupyter section if any
+    if st.session_state.get("active_jupyter"):
+        aj = st.session_state["active_jupyter"]
+        pid = aj.get("pid")
+        st.subheader("Active Jupyter")
+        status = get_status(pid)
+        if status.get("running"):
+            st.info(f"Jupyter server is running (PID {pid}).")
+            col_tj1, col_tj2 = st.columns([1, 3])
+            with col_tj1:
+                if st.button("Terminate Jupyter", key="terminate_jupyter_btn"):
+                    terminate_process(pid)
+                    st.success("Termination signal sent to Jupyter.")
+                    try:
+                        st.rerun()
+                    except Exception:
+                        try:
+                            st.experimental_rerun()
+                        except Exception:
+                            pass
+            with col_tj2:
+                st.caption("Log generation (tail)")
+                out_path = aj.get("stdout_path")
+                err_path = aj.get("stderr_path")
+                combined_tail = ""
+                try:
+                    if out_path and os.path.exists(out_path):
+                        with open(out_path, "r", encoding="utf-8", errors="ignore") as f:
+                            out_lines = f.readlines()[-200:]
+                        combined_tail += "".join(out_lines)
+                except Exception:
+                    pass
+                try:
+                    if err_path and os.path.exists(err_path):
+                        with open(err_path, "r", encoding="utf-8", errors="ignore") as f:
+                            err_lines = f.readlines()[-200:]
+                        if err_lines:
+                            if combined_tail:
+                                combined_tail += "\n\nSTDERR (tail):\n"
+                            combined_tail += "".join(err_lines)
+                except Exception:
+                    pass
+                st.text_area("Stdout", value=combined_tail or "(no output yet)", height=300, key=_next_ui_key("live_jupyter_tail"), label_visibility="collapsed")
+        else:
+            st.success(f"Jupyter server finished (rc={status.get('returncode')}).")
+            st.session_state["active_jupyter"] = None
+
+    # --- Global termination controls ---
+    st.subheader("Kill Process by PID")
+    st.caption("Send a termination signal to any running process by its PID. Use carefully.")
+    kill_pid_str = st.text_input("PID", value=st.session_state.get("kill_pid_str", ""), key="tools_kill_pid_input")
+    st.session_state["kill_pid_str"] = kill_pid_str
+    if st.button("Kill PID", key="tools_kill_pid_btn"):
+        try:
+            pid = int(kill_pid_str)
+        except Exception:
+            st.error("Please enter a valid integer PID.")
+        else:
+            before = get_status(pid)
+            if not before.get("known") and not before.get("running") and before.get("returncode") is None:
+                st.warning(f"PID {pid} is not tracked by the dashboard. Attempting termination anyway.")
+            try:
+                terminate_process(pid)
+            except Exception as e:
+                logging.getLogger("dashboard").exception("Failed to terminate PID")
+                st.error(f"Failed to terminate PID {pid}: {e}")
+            else:
+                after = get_status(pid)
+                st.success(f"Termination signal sent to PID {pid}.")
+                st.caption(f"Before: running={before.get('running')} rc={before.get('returncode')} | After: running={after.get('running')} rc={after.get('returncode')}")
+
+    st.subheader("Terminate all active runs")
+    st.caption("Stops all processes started via the dashboard (modules, terminal, Jupyter) that are still tracked.")
+    if st.button("Terminate All", key="tools_terminate_all_btn"):
+        pids = list(ACTIVE_PROCS.keys())
+        if not pids:
+            st.info("No active tracked processes.")
+        else:
+            terminated = []
+            failed = []
+            for pid in pids:
+                try:
+                    ok = terminate_process(pid)
+                    if ok:
+                        terminated.append(pid)
+                    else:
+                        failed.append(pid)
+                except Exception:
+                    failed.append(pid)
+            if terminated:
+                st.success(f"Terminated: {', '.join(str(p) for p in terminated)}")
+            if failed:
+                st.warning(f"Failed/Not found: {', '.join(str(p) for p in failed)}")
 
 
 def main() -> None:
