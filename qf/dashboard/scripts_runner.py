@@ -19,6 +19,7 @@ import shutil
 import json
 import signal
 import time
+import threading
 from datetime import datetime
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
@@ -63,25 +64,36 @@ def _get_streamlit_config() -> Dict[str, Any]:
     except Exception:
         return {}
 
-def get_runners_package() -> str:
-    """Return the configured runners package name from config.toml or default to 'runners'.
+def get_runners_packages_list() -> List[str]:
+    """Return a list of configured runners packages from config.toml.
 
-    This reads only the top-level `runners_package` key in `.streamlit/config.toml`.
-    Previously the code looked under a `[dashboard]` table which is deprecated.
+    Supports `runners_package` as either a single string or a TOML array, at the top level
+    or under the legacy `[dashboard]` table. Falls back to ['runners'] if undefined.
     """
     data = _get_streamlit_config()
-    pkg = None
+    pkgs: List[str] = []
     try:
-        # Support both top-level and the legacy [dashboard] table for compatibility.
-        # Prefer top-level key if present, otherwise fall back to [dashboard].runners_package
         if isinstance(data, dict):
-            pkg = data.get("runners_package")
-            if not pkg and "dashboard" in data and isinstance(data["dashboard"], dict):
-                pkg = data["dashboard"].get("runners_package")
+            raw = data.get("runners_package")
+            if raw is None and isinstance(data.get("dashboard"), dict):
+                raw = data["dashboard"].get("runners_package")
+            if isinstance(raw, list):
+                pkgs = [str(x).strip() for x in raw if str(x).strip()]
+            elif isinstance(raw, str):
+                val = raw.strip()
+                if val:
+                    pkgs = [val]
     except Exception:
-        pkg = None
-    pkg = (pkg or "runners").strip()
-    return pkg or "runners"
+        pkgs = []
+    if not pkgs:
+        pkgs = ["runners"]
+    return pkgs
+
+
+def get_runners_package() -> str:
+    """Return the preferred runners package (first from list)."""
+    pkgs = get_runners_packages_list()
+    return pkgs[0] if pkgs else "runners"
 
 RUNNERS_PACKAGE = get_runners_package()
 CONDA_ENV_NAME = "qf"
@@ -414,21 +426,21 @@ def ensure_default_env_config() -> None:
         "API_KEY": "dev-key",
         "LOG_LEVEL": "INFO",
         "CONDA_ENV": CONDA_ENV_NAME,
-        "CONFIG_PATH": "",
+        "CONFIG_PATH": "~/.dashboard/config",
     }
     cp["UAT"] = {
         "API_URL": "https://uat.api.example.com",
         "API_KEY": "uat-key",
         "LOG_LEVEL": "INFO",
         "CONDA_ENV": CONDA_ENV_NAME,
-        "CONFIG_PATH": "",
+        "CONFIG_PATH": "~/.dashboard/config",
     }
     cp["PROD"] = {
         "API_URL": "https://api.example.com",
         "API_KEY": "prod-key",
         "LOG_LEVEL": "WARNING",
         "CONDA_ENV": CONDA_ENV_NAME,
-        "CONFIG_PATH": "",
+        "CONFIG_PATH": "~/.dashboard/config",
     }
     with open(cfg_path, "w", encoding="utf-8") as f:
         cp.write(f)
@@ -648,6 +660,10 @@ def run_subprocess(cmd: List[str], cwd: Optional[str] = None, extra_env: Optiona
 
 # Keep track of active processes by PID (lives in process memory; suitable for Streamlit session lifecycle)
 ACTIVE_PROCS: Dict[int, subprocess.Popen] = {}
+# Map PID to (stdout_path, stderr_path) for attaching/tailing logs later
+ACTIVE_LOG_PATHS: Dict[int, Dict[str, str]] = {}
+# Map PID to tailer control (thread and stop event)
+ACTIVE_TAILERS: Dict[int, Dict[str, Any]] = {}
 
 
 def start_subprocess(
@@ -695,7 +711,36 @@ def start_subprocess(
             logger.exception("Failed to start subprocess")
             raise
 
+    # After starting the process, include PID in log filenames for easier tracking.
+    try:
+        pid_suffix = f"_pid_{p.pid}"
+        new_stdout_path = os.path.join(RUN_LOGS_DIR, f"{prefix}{pid_suffix}.out.log")
+        new_stderr_path = os.path.join(RUN_LOGS_DIR, f"{prefix}{pid_suffix}.err.log")
+        # Attempt to rename existing files; if it fails, keep original paths.
+        try:
+            os.rename(stdout_path, new_stdout_path)
+            stdout_path = new_stdout_path
+        except Exception:
+            pass
+        try:
+            os.rename(stderr_path, new_stderr_path)
+            stderr_path = new_stderr_path
+        except Exception:
+            pass
+        logger.info(
+            "Logs for PID %s: stdout=%s stderr=%s",
+            p.pid,
+            stdout_path,
+            stderr_path,
+        )
+    except Exception:
+        logger.exception("Failed to include PID in log filenames for PID %s", p.pid)
+
     ACTIVE_PROCS[p.pid] = p
+    ACTIVE_LOG_PATHS[p.pid] = {
+        "stdout": stdout_path,
+        "stderr": stderr_path,
+    }
     joined = " ".join(shlex.quote(c) for c in cmd)
     logger.info("Started PID %s: %s (cwd=%s)", p.pid, joined, cwd or os.getcwd())
     return {
@@ -740,6 +785,14 @@ def terminate_process(pid: int, force_after: float = 5.0) -> bool:
     while time.time() < deadline:
         if p.poll() is not None:
             ACTIVE_PROCS.pop(pid, None)
+            ACTIVE_LOG_PATHS.pop(pid, None)
+            # Stop tailer if running
+            try:
+                ctl = ACTIVE_TAILERS.pop(pid, None)
+                if ctl and isinstance(ctl.get("stop"), threading.Event):
+                    ctl["stop"].set()
+            except Exception:
+                pass
             logger.info("Process %s terminated with rc=%s", pid, p.returncode)
             return True
         time.sleep(0.1)
@@ -753,5 +806,142 @@ def terminate_process(pid: int, force_after: float = 5.0) -> bool:
         except Exception:
             pass
     ACTIVE_PROCS.pop(pid, None)
+    ACTIVE_LOG_PATHS.pop(pid, None)
+    try:
+        ctl = ACTIVE_TAILERS.pop(pid, None)
+        if ctl and isinstance(ctl.get("stop"), threading.Event):
+            ctl["stop"].set()
+    except Exception:
+        pass
     logger.info("Process %s force-killed", pid)
     return True
+
+
+def attach_log_tail_to_dashboard(pid: int, max_lines: int = 200, label: Optional[str] = None) -> bool:
+    """Append the tail of a subprocess's stdout/stderr logs into the dashboard log.
+
+    Returns True if attached successfully, False otherwise.
+    """
+    logger = logging.getLogger("dashboard.attach")
+    paths = ACTIVE_LOG_PATHS.get(pid)
+    if not paths:
+        # If not tracked (e.g., after restart), try to infer from known runs folder by scanning filenames with pid in name (best-effort)
+        return False
+    out_path = paths.get("stdout")
+    err_path = paths.get("stderr")
+    try:
+        combined_tail = []
+        if out_path and os.path.exists(out_path):
+            with open(out_path, "r", encoding="utf-8", errors="ignore") as f:
+                lines = f.readlines()
+            combined_tail.append("".join(lines[-max_lines:]))
+        if err_path and os.path.exists(err_path):
+            with open(err_path, "r", encoding="utf-8", errors="ignore") as f:
+                lines = f.readlines()
+            if lines:
+                combined_tail.append("\n\nSTDERR (tail):\n" + "".join(lines[-max_lines:]))
+        text = ("".join(combined_tail)).strip()
+        header = f"[ATTACH] PID={pid}{(' '+str(label)) if label else ''}"
+        if text:
+            # Write as a single info entry; rotation will cap file size
+            logger.info("%s\n%s", header, text)
+        else:
+            logger.info("%s (no output)", header)
+        return True
+    except Exception:
+        logging.getLogger("dashboard.runners").exception("Failed to attach logs for PID %s", pid)
+        return False
+
+
+def _tail_attach_loop(pid: int, label: Optional[str], interval: float, stop_event: threading.Event) -> None:
+    """Background loop to attach new stdout/stderr content to dashboard log."""
+    logger = logging.getLogger("dashboard.attach")
+    p = ACTIVE_PROCS.get(pid)
+    paths = ACTIVE_LOG_PATHS.get(pid, {})
+    out_path = paths.get("stdout")
+    err_path = paths.get("stderr")
+    # Track file positions to only read new content
+    out_pos = 0
+    err_pos = 0
+    try:
+        if out_path and os.path.exists(out_path):
+            out_pos = os.path.getsize(out_path)
+        if err_path and os.path.exists(err_path):
+            err_pos = os.path.getsize(err_path)
+    except Exception:
+        out_pos = err_pos = 0
+
+    while not stop_event.is_set():
+        try:
+            # Exit if process ended
+            pcur = ACTIVE_PROCS.get(pid)
+            if (pcur is None) or (pcur.poll() is not None):
+                break
+            chunks: List[str] = []
+            if out_path and os.path.exists(out_path):
+                with open(out_path, "r", encoding="utf-8", errors="ignore") as f:
+                    f.seek(out_pos)
+                    data = f.read()
+                if data:
+                    out_pos += len(data)
+                    chunks.append(data)
+            if err_path and os.path.exists(err_path):
+                with open(err_path, "r", encoding="utf-8", errors="ignore") as f:
+                    f.seek(err_pos)
+                    data = f.read()
+                if data:
+                    err_pos += len(data)
+                    chunks.append("\n\nSTDERR:\n" + data)
+            if chunks:
+                header = f"[TAIL] PID={pid}{(' '+str(label)) if label else ''}"
+                logger.info("%s\n%s", header, "".join(chunks).rstrip())
+        except Exception:
+            logging.getLogger("dashboard.runners").exception("Tail attach loop error for PID %s", pid)
+        # Sleep briefly
+        try:
+            time.sleep(max(0.5, float(interval)))
+        except Exception:
+            time.sleep(1.0)
+
+    # Clean up when exiting
+    try:
+        ACTIVE_TAILERS.pop(pid, None)
+    except Exception:
+        pass
+
+
+def enable_auto_attach(pid: int, label: Optional[str] = None, interval: float = 2.0) -> bool:
+    """Start a background tailer to auto-attach new log output to dashboard log."""
+    if pid in ACTIVE_TAILERS:
+        return True
+    if pid not in ACTIVE_PROCS or pid not in ACTIVE_LOG_PATHS:
+        return False
+    stop_event = threading.Event()
+    th = threading.Thread(target=_tail_attach_loop, args=(pid, label, interval, stop_event), daemon=True)
+    ACTIVE_TAILERS[pid] = {"thread": th, "stop": stop_event, "interval": interval, "label": label}
+    try:
+        th.start()
+        return True
+    except Exception:
+        logging.getLogger("dashboard.runners").exception("Failed to start auto attach for PID %s", pid)
+        ACTIVE_TAILERS.pop(pid, None)
+        return False
+
+
+def disable_auto_attach(pid: int) -> bool:
+    """Stop the background tailer for a PID if running."""
+    ctl = ACTIVE_TAILERS.get(pid)
+    if not ctl:
+        return False
+    try:
+        stop_event = ctl.get("stop")
+        if isinstance(stop_event, threading.Event):
+            stop_event.set()
+        return True
+    except Exception:
+        logging.getLogger("dashboard.runners").exception("Failed to stop auto attach for PID %s", pid)
+        return False
+
+
+def auto_attach_enabled(pid: int) -> bool:
+    return pid in ACTIVE_TAILERS

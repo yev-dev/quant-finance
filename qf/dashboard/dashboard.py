@@ -44,10 +44,15 @@ from scripts_runner import (
     get_status,
     terminate_process,
     get_runners_package,
+    get_runners_packages_list,
     _get_streamlit_config,
     set_runners_source_from_env,
     set_runners_package,
     ACTIVE_PROCS,
+    attach_log_tail_to_dashboard,
+    enable_auto_attach,
+    disable_auto_attach,
+    auto_attach_enabled,
 )
 
 # Point to the runners directory (one level down from this file)
@@ -59,6 +64,39 @@ HOME_LOG_DIR = os.path.join(os.path.expanduser("~"), ".dashboard", "logs")
 LOG_DIR = HOME_LOG_DIR
 LOG_FILE = os.path.join(LOG_DIR, "dashboard.log")
 UPLOADS_DIR = os.path.join(DASHBOARD_DIR, "uploads")
+
+def _get_auto_attach_settings() -> tuple[bool, float]:
+    """Return (enabled_by_default, interval_seconds) from .streamlit/config.toml.
+
+    Supports keys at top-level or under the [dashboard] table:
+      - auto_attach (bool)
+      - auto_attach_interval (float)
+    Defaults: enabled=True, interval=2.0
+    """
+    try:
+        cfg = _get_streamlit_config() or {}
+        enabled_val = None
+        interval_val = None
+        if isinstance(cfg, dict):
+            enabled_val = cfg.get("auto_attach")
+            interval_val = cfg.get("auto_attach_interval")
+            db = cfg.get("dashboard") if isinstance(cfg.get("dashboard"), dict) else None
+            if db is not None:
+                if enabled_val is None:
+                    enabled_val = db.get("auto_attach")
+                if interval_val is None:
+                    interval_val = db.get("auto_attach_interval")
+        enabled = bool(enabled_val) if enabled_val is not None else True
+        try:
+            interval = float(interval_val) if interval_val is not None else 2.0
+        except Exception:
+            interval = 2.0
+        return enabled, interval
+    except Exception:
+        return True, 2.0
+
+# Resolve preferences once per process; Streamlit reruns will reuse these
+AUTO_ATTACH_DEFAULT, AUTO_ATTACH_INTERVAL = _get_auto_attach_settings()
 
 def _next_ui_key(prefix: str) -> str:
     """Return a unique Streamlit widget key for this session using a counter."""
@@ -119,13 +157,14 @@ def render_inputs(specs: List[ArgSpec]) -> Dict[str, Any]:
 # --- Tab renderers for modularity ---
 def render_script_runners_tab() -> None:
     st.header("Dynamic Python Script Runner")
-    # Runners package is resolved from the top-level config (no [dashboard] override)
+    # Scripts package(s) resolved from config; prefer first but allow selection
     runners_pkg = get_runners_package()
+    pkg_options = get_runners_packages_list() or [runners_pkg]
     # Allow a session-only override (user may change package in the UI without saving)
     if st.session_state.get("runners_package_override"):
         runners_pkg = st.session_state.get("runners_package_override")
     st.caption(
-        f"Scans runner modules from package: '{runners_pkg}', infers CLI parameters (argparse), and runs them."
+        f"Scans scripts from package: '{runners_pkg}', infers CLI parameters (argparse), and runs them."
     )
 
     # Environment selection (dynamically loaded from config.ini)
@@ -146,21 +185,51 @@ def render_script_runners_tab() -> None:
             for k, v in env_vars.items():
                 st.write(f"- {k} = {v}")
 
-    # Optional: validate resolved runners package inside the selected conda env
+    # Optional: validate resolved scripts package inside the selected conda env
     col_pkg1, col_pkg2, col_pkg3 = st.columns([3, 1, 1])
-    # Session-only editable runners package input
+    # Session-only select or custom scripts package input
     with col_pkg1:
         rp_key = "runners_package_override"
         default_rp = st.session_state.get(rp_key, runners_pkg)
-        # Use a dedicated input key so value persists while editing
-        _ = st.text_input("Runners package (session)", value=default_rp, key="runners_pkg_input")
+        # Select from config-provided options
+        try:
+            idx = pkg_options.index(default_rp) if default_rp in pkg_options else 0
+        except Exception:
+            idx = 0
+        selected_pkg = st.selectbox("Scripts package (from config)", options=pkg_options, index=idx, key="runners_pkg_select")
+        # Dynamically apply selection to refresh module list
+        try:
+            prev_sel = st.session_state.get("runners_pkg_select_prev")
+            if selected_pkg and selected_pkg != prev_sel:
+                set_runners_package(selected_pkg)
+                st.session_state[rp_key] = selected_pkg
+                st.session_state["runners_pkg_select_prev"] = selected_pkg
+                # Try set source from current env for resolution
+                try:
+                    sel_env = st.session_state.get("selected_env", (list_env_names() or ["DEV"]) [0])
+                    env_vars_sel = get_env_for(sel_env)
+                    conda_env_name = env_vars_sel.get("CONDA_ENV") or "qf"
+                    set_runners_source_from_env(conda_env_name, selected_pkg)
+                except Exception:
+                    pass
+                try:
+                    st.rerun()
+                except Exception:
+                    try:
+                        st.experimental_rerun()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        # Optional custom entry
+        _ = st.text_input("Scripts package (custom)", value=default_rp, key="runners_pkg_input")
     with col_pkg2:
-        if st.button("Apply runners package (session only)"):
-            new_pkg = st.session_state.get("runners_pkg_input", default_rp)
+        if st.button("Apply selected (session only)"):
+            new_pkg = st.session_state.get("runners_pkg_select", default_rp)
             try:
                 set_runners_package(new_pkg)
                 st.session_state[rp_key] = new_pkg
-                st.success(f"Using runners package '{new_pkg}' for this session.")
+                st.success(f"Using scripts package '{new_pkg}' for this session.")
                 try:
                     st.rerun()
                 except Exception:
@@ -169,9 +238,24 @@ def render_script_runners_tab() -> None:
                     except Exception:
                         pass
             except Exception as e:
-                st.error(f"Failed to apply runners package: {e}")
+                st.error(f"Failed to apply scripts package: {e}")
+        if st.button("Apply custom (session only)"):
+            new_pkg = st.session_state.get("runners_pkg_input", default_rp)
+            try:
+                set_runners_package(new_pkg)
+                st.session_state[rp_key] = new_pkg
+                st.success(f"Using scripts package '{new_pkg}' for this session.")
+                try:
+                    st.rerun()
+                except Exception:
+                    try:
+                        st.experimental_rerun()
+                    except Exception:
+                        pass
+            except Exception as e:
+                st.error(f"Failed to apply scripts package: {e}")
     with col_pkg3:
-        if st.button("Validate package in Env"):
+        if st.button("Validate scripts package in Env"):
             envs_list = list_env_names() or ["DEV", "UAT", "PROD"]
             sel_env = st.session_state.get("selected_env", envs_list[0] if envs_list else "DEV")
             env_vars_sel = get_env_for(sel_env)
@@ -205,13 +289,13 @@ def render_script_runners_tab() -> None:
         "Conda (by name)": "conda",
         "Interpreter path (env python)": "python",
     }
-    default_backend_key = next((k for k, v in backend_options.items() if v == st.session_state.get("runner_backend", "conda")), "Conda (by name)")
+    default_backend_key = next((k for k, v in backend_options.items() if v == st.session_state.get("runner_backend", "python")), "Interpreter path (env python)")
     chosen_backend_key = st.selectbox("Backend", options=list(backend_options.keys()), index=list(backend_options.keys()).index(default_backend_key))
     st.session_state["runner_backend"] = backend_options[chosen_backend_key]
 
     modules = list_runner_modules()
     if not modules:
-        st.warning(f"No runner modules found in the '{runners_pkg}' package.")
+        st.warning(f"No modules found in the scripts package '{runners_pkg}'.")
         return
 
     # Import modules so Streamlit's watcher tracks changes
@@ -473,6 +557,45 @@ def render_script_runners_tab() -> None:
                             except Exception:
                                 pass
 
+            # Advanced editor: modify any JSON node directly
+            st.subheader("Raw JSON editor (advanced)")
+            st.caption("Edit the full JSON preset. Useful for custom structures beyond the guided form.")
+            # Keep a separate text buffer in session so typing doesn't immediately overwrite the working copy
+            raw_key = f"cfg_raw_json_{module_name}"
+            if raw_key not in st.session_state:
+                try:
+                    st.session_state[raw_key] = json.dumps(working, indent=2)
+                except Exception:
+                    st.session_state[raw_key] = "{}"
+            # Increase editor height by ~30% for better visibility
+            raw_text = st.text_area("JSON", value=st.session_state.get(raw_key, "{}"), height=312, key=raw_key)
+            col_rj1, col_rj2 = st.columns([1, 1])
+            with col_rj1:
+                if st.button("Validate JSON", key=f"cfg_raw_validate_{module_name}"):
+                    try:
+                        json.loads(raw_text)
+                    except Exception as e:
+                        st.error(f"Invalid JSON: {e}")
+                    else:
+                        st.success("JSON is valid.")
+            with col_rj2:
+                if st.button("Apply to preset", key=f"cfg_raw_apply_{module_name}"):
+                    try:
+                        parsed = json.loads(raw_text)
+                        # Replace the working copy with the parsed JSON so downstream Save/Run uses it
+                        working = parsed
+                        st.session_state[work_key] = deepcopy(parsed)
+                        st.success("Applied raw JSON to preset.")
+                        try:
+                            st.rerun()
+                        except Exception:
+                            try:
+                                st.experimental_rerun()
+                            except Exception:
+                                pass
+                    except Exception as e:
+                        st.error(f"Failed to apply JSON: {e}")
+
             # Persist working copy back into session and provide actions
             st.session_state[work_key] = working
 
@@ -492,6 +615,18 @@ def render_script_runners_tab() -> None:
                         st.success(f"Config saved to {target_path}.")
                     except Exception as e:
                         st.error(f"Failed to save config: {e}")
+                # Quick create when file doesn't exist yet
+                if not os.path.exists(config_path_input):
+                    if st.button("Create default preset here", key="cfg_create_default_btn"):
+                        target_path = config_path_input
+                        try:
+                            os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                            with open(target_path, "w", encoding="utf-8") as f:
+                                json.dump(working, f, indent=2)
+                            st.session_state[cfg_file_key] = target_path
+                            st.success(f"Default preset created at {target_path}.")
+                        except Exception as e:
+                            st.error(f"Failed to create preset: {e}")
             with col_r:
                 # Dry run: show command and environment but do not execute
                 if st.button("Dry run (show config)", key=f"cfg_dryrun_{module_name}"):
@@ -509,7 +644,7 @@ def render_script_runners_tab() -> None:
                                 name = str(a.get("name", "")).strip()
                                 if name:
                                     cfg_values[name] = a.get("value")
-                            cmd_cfg = build_command(module_name, specs, cfg_values, conda_env_name=conda_env_cfg, backend=st.session_state.get("runner_backend", "conda"))
+                            cmd_cfg = build_command(module_name, specs, cfg_values, conda_env_name=conda_env_cfg, backend=st.session_state.get("runner_backend", "python"))
                         else:
                             rpkg = runners_pkg
                             cmd_cfg = [
@@ -553,7 +688,7 @@ def render_script_runners_tab() -> None:
                             cmd_cfg = build_command(module_name, specs, cfg_values, conda_env_name=conda_env_cfg)
                         else:
                             # Build base command according to backend
-                            cmd_cfg = build_command(module_name, [], {}, conda_env_name=conda_env_cfg, backend=st.session_state.get("runner_backend", "conda"))
+                            cmd_cfg = build_command(module_name, [], {}, conda_env_name=conda_env_cfg, backend=st.session_state.get("runner_backend", "python"))
                             defaults = working.get("defaults", {})
                             provided = {k: v for k, v in defaults.items() if str(v).strip()}
                             if working.get("passMode", "argv tokens") == "argv tokens":
@@ -618,6 +753,12 @@ def render_script_runners_tab() -> None:
                                 except Exception:
                                     pass
                                 st.text_area("Stdout", value=combined_tail or "(no output yet)", height=300, key=f"initial_cfg_tail_{info['pid']}", label_visibility="collapsed")
+                                # Start auto attach by default
+                                try:
+                                    if AUTO_ATTACH_DEFAULT:
+                                        enable_auto_attach(info.get("pid"), label=module_name, interval=AUTO_ATTACH_INTERVAL)
+                                except Exception:
+                                    pass
                         else:
                             # Run synchronously and show outputs inline
                             try:
@@ -665,8 +806,8 @@ def render_script_runners_tab() -> None:
         if not specs:
             st.markdown("#### Non-argparse inputs (optional)")
             st.caption("Any string formats are accepted; values are concatenated and separated with ':' by the module.")
-            run_date = st.text_input("RUN_DATE (any format)", value="", placeholder="e.g., 2025/01/01 or Jan-01-2025")
             cob_date = st.text_input("COB_DATE (any format)", value="", placeholder="e.g., 2025/01/02 or Jan-02-2025")
+            run_date = st.text_input("RUN_DATE (any format)", value="", placeholder="e.g., 2025/01/01 or Jan-01-2025")
             start_date = st.text_input("START_DATE (any format)", value="", placeholder="e.g., 2025.01.01")
             end_date = st.text_input("END_DATE (any format)", value="", placeholder="e.g., 2025_12_31")
             pass_mode = st.radio(
@@ -690,7 +831,7 @@ def render_script_runners_tab() -> None:
         if not exists:
             st.error(f"Conda environment '{conda_env}' not found. Details: {detail}")
         else:
-            cmd = build_command(module_name, specs, values, conda_env_name=conda_env, backend=st.session_state.get("runner_backend", "conda"))
+            cmd = build_command(module_name, specs, values, conda_env_name=conda_env, backend=st.session_state.get("runner_backend", "python"))
             # If no argparse specs, optionally pass tokens/env values for non-argparse modules
             effective_env = dict(env_vars)
             provided = {}
@@ -726,10 +867,38 @@ def render_script_runners_tab() -> None:
             st.info(f"Module '{active.get('module')}' is running (PID {pid}).")
             col1, col2 = st.columns([1, 3])
             with col1:
+                # Auto-attach toggle
+                enabled = auto_attach_enabled(pid)
+                auto_on = st.checkbox("Auto attach to dashboard log", value=enabled, key=f"auto_attach_run_{pid}")
+                if auto_on and not enabled:
+                    try:
+                        enable_auto_attach(pid, label=active.get("module"), interval=AUTO_ATTACH_INTERVAL)
+                    except Exception:
+                        pass
+                elif (not auto_on) and enabled:
+                    try:
+                        disable_auto_attach(pid)
+                    except Exception:
+                        pass
                 if st.button("Terminate Run", key="terminate_btn"):
                     terminate_process(pid)
                     st.success("Termination signal sent.")
                     # Immediately refresh UI so the running status updates
+                    try:
+                        st.rerun()
+                    except Exception:
+                        try:
+                            st.experimental_rerun()
+                        except Exception:
+                            pass
+                if st.button("Attach tail to dashboard log", key="attach_run_tail_btn"):
+                    ok = attach_log_tail_to_dashboard(pid, max_lines=200, label=active.get("module"))
+                    if ok:
+                        st.success("Attached current tail to dashboard.log")
+                    else:
+                        st.error("Failed to attach log tail for this PID")
+                if st.button("Refresh Log", key="refresh_run_log_btn"):
+                    # Rerun to reread tail files and update UI
                     try:
                         st.rerun()
                     except Exception:
@@ -816,6 +985,11 @@ def render_script_runners_tab() -> None:
                     combined += err_text
                 st.subheader("Log generation")
                 st.text_area("Stdout", value=combined or "(no output)", height=400, key=f"final_log_{pid}", label_visibility="collapsed")
+            # Attach tail to dashboard log on completion (best-effort)
+            try:
+                attach_log_tail_to_dashboard(pid, max_lines=400, label=active.get("module"))
+            except Exception:
+                pass
             st.session_state["active_run"] = None
 
     if run_btn and not st.session_state.get("active_run"):
@@ -824,7 +998,7 @@ def render_script_runners_tab() -> None:
         if not exists:
             st.error(f"Conda environment '{conda_env}' not found. Details: {detail}")
             return
-        cmd = build_command(module_name, specs, values, conda_env_name=conda_env, backend=st.session_state.get("runner_backend", "conda"))
+        cmd = build_command(module_name, specs, values, conda_env_name=conda_env, backend=st.session_state.get("runner_backend", "python"))
         # If no argparse specs, optionally pass tokens/env values for non-argparse modules
         effective_env = dict(env_vars)
         if not specs:
@@ -905,6 +1079,11 @@ def render_script_runners_tab() -> None:
                 st.text_area("Stdout", value=combined_tail or "(no output yet)", height=300, key=f"initial_tail_{info['pid']}", label_visibility="collapsed")
             except Exception:
                 pass
+            # Start auto attach by default
+            try:
+                enable_auto_attach(info.get("pid"), label=module_name, interval=2.0)
+            except Exception:
+                pass
         else:
             # Run synchronously and show output inline
             try:
@@ -950,8 +1129,8 @@ def render_script_runners_tab() -> None:
                 "stderr": result.stderr or "",
             })
 
-    # --- Historical Run Logs (moved from Logs tab) ---
-    st.subheader("Run Logs")
+    # --- Historical Log Runs (moved from Logs tab) ---
+    st.subheader("Historical Log Runs")
     logs = list(st.session_state.get("run_logs", []))
     if not logs:
         st.info("No runs yet.")
@@ -976,6 +1155,17 @@ def render_logs_tab() -> None:
     st.header("Logs")
     # Only show the tail of the dashboard log file in this tab
     st.subheader("Dashboard Log (tail)")
+    # Manual refresh button to force reread of the log tail
+    col_rl1, col_rl2 = st.columns([1, 3])
+    with col_rl1:
+        if st.button("Refresh", key="refresh_dashboard_log_btn"):
+            try:
+                st.rerun()
+            except Exception:
+                try:
+                    st.experimental_rerun()
+                except Exception:
+                    pass
     try:
         if os.path.exists(LOG_FILE):
             with open(LOG_FILE, "r", encoding="utf-8", errors="ignore") as f:
@@ -1053,6 +1243,20 @@ def render_config_tab() -> None:
             st.success("Config saved. App will auto-reload on save if watcher is enabled.")
         except Exception as e:
             st.error(f"Failed to save config: {e}")
+
+
+def render_readme_tab() -> None:
+    st.header("Docs")
+    readme_path = os.path.join(DASHBOARD_DIR, "README.md")
+    try:
+        if os.path.exists(readme_path):
+            with open(readme_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            st.markdown(content)
+        else:
+            st.info("README.md not found in the dashboard directory.")
+    except Exception as e:
+        st.error(f"Failed to read README.md: {e}")
 
 
 def render_reconciliation_tab() -> None:
@@ -1417,6 +1621,11 @@ def render_tools_tab() -> None:
                     }
                 except Exception:
                     pass
+                # Start auto attach by default
+                try:
+                    enable_auto_attach(info.get("pid"), label="Jupyter", interval=2.0)
+                except Exception:
+                    pass
                 try:
                     logging.getLogger("dashboard").info(
                         "Jupyter started: env=%s pid=%s cwd=%s open_browser=%s stdout=%s stderr=%s",
@@ -1506,6 +1715,11 @@ def render_tools_tab() -> None:
             except Exception:
                 pass
             st.text_area("Stdout", value=combined_tail or "(no output yet)", height=300, key=_next_ui_key("initial_terminal_tail"), label_visibility="collapsed")
+            # Start auto attach by default
+            try:
+                enable_auto_attach(info.get("pid"), label="Terminal", interval=2.0)
+            except Exception:
+                pass
 
     # Active terminal section
     if st.session_state.get("active_terminal"):
@@ -1517,9 +1731,35 @@ def render_tools_tab() -> None:
             st.info(f"Command is running (PID {pid}).")
             col_tt1, col_tt2 = st.columns([1, 3])
             with col_tt1:
+                enabled = auto_attach_enabled(pid)
+                auto_on = st.checkbox("Auto attach to dashboard log", value=enabled, key=f"auto_attach_terminal_{pid}")
+                if auto_on and not enabled:
+                    try:
+                        enable_auto_attach(pid, label="Terminal", interval=2.0)
+                    except Exception:
+                        pass
+                elif (not auto_on) and enabled:
+                    try:
+                        disable_auto_attach(pid)
+                    except Exception:
+                        pass
                 if st.button("Terminate Command", key="terminate_terminal_btn"):
                     terminate_process(pid)
                     st.success("Termination signal sent.")
+                    try:
+                        st.rerun()
+                    except Exception:
+                        try:
+                            st.experimental_rerun()
+                        except Exception:
+                            pass
+                if st.button("Attach tail to dashboard log", key="attach_terminal_tail_btn"):
+                    ok = attach_log_tail_to_dashboard(pid, max_lines=200, label="Terminal")
+                    if ok:
+                        st.success("Attached current tail to dashboard.log")
+                    else:
+                        st.error("Failed to attach log tail for this PID")
+                if st.button("Refresh Log", key="refresh_terminal_log_btn"):
                     try:
                         st.rerun()
                     except Exception:
@@ -1563,9 +1803,35 @@ def render_tools_tab() -> None:
             st.info(f"Jupyter server is running (PID {pid}).")
             col_tj1, col_tj2 = st.columns([1, 3])
             with col_tj1:
+                enabled = auto_attach_enabled(pid)
+                auto_on = st.checkbox("Auto attach to dashboard log", value=enabled, key=f"auto_attach_jupyter_{pid}")
+                if auto_on and not enabled:
+                    try:
+                        enable_auto_attach(pid, label="Jupyter", interval=AUTO_ATTACH_INTERVAL)
+                    except Exception:
+                        pass
+                elif (not auto_on) and enabled:
+                    try:
+                        disable_auto_attach(pid)
+                    except Exception:
+                        pass
                 if st.button("Terminate Jupyter", key="terminate_jupyter_btn"):
                     terminate_process(pid)
                     st.success("Termination signal sent to Jupyter.")
+                    try:
+                        st.rerun()
+                    except Exception:
+                        try:
+                            st.experimental_rerun()
+                        except Exception:
+                            pass
+                if st.button("Attach tail to dashboard log", key="attach_jupyter_tail_btn"):
+                    ok = attach_log_tail_to_dashboard(pid, max_lines=200, label="Jupyter")
+                    if ok:
+                        st.success("Attached current tail to dashboard.log")
+                    else:
+                        st.error("Failed to attach log tail for this PID")
+                if st.button("Refresh Log", key="refresh_jupyter_log_btn"):
                     try:
                         st.rerun()
                     except Exception:
@@ -1647,6 +1913,155 @@ def render_tools_tab() -> None:
             if failed:
                 st.warning(f"Failed/Not found: {', '.join(str(p) for p in failed)}")
 
+    # --- Running Processes table with multi-select terminate ---
+    st.subheader("Running Processes")
+    st.caption("Processes started by the dashboard and still running. Select multiple to terminate.")
+    try:
+        rows = []
+        for pid, p in list(ACTIVE_PROCS.items()):
+            stat = get_status(pid)
+            if not stat.get("running"):
+                continue
+            # Build command string
+            try:
+                args = getattr(p, "args", None)
+            except Exception:
+                args = None
+            if isinstance(args, (list, tuple)):
+                try:
+                    cmd_str = " ".join(shlex.quote(str(a)) for a in args)
+                except Exception:
+                    cmd_str = " ".join(str(a) for a in args)
+            else:
+                cmd_str = str(args) if args is not None else ""
+            # Heuristic name
+            name = "Process"
+            lc = (cmd_str or "").lower()
+            if "jupyter" in lc and "notebook" in lc:
+                name = "Jupyter Notebook"
+            elif " bash " in f" {lc} " and " -lc " in f" {lc} ":
+                name = "Terminal"
+            elif " -m " in f" {cmd_str} ":
+                try:
+                    parts = cmd_str.split()
+                    if "-m" in parts:
+                        mod = parts[parts.index("-m") + 1]
+                        name = mod.split(".")[-1]
+                except Exception:
+                    pass
+            elif isinstance(args, (list, tuple)) and args:
+                name = os.path.basename(str(args[0]))
+            # Truncate parameters for display
+            params_display = cmd_str
+            if len(params_display) > 200:
+                params_display = params_display[:200] + " …"
+            rows.append({
+                "select": False,
+                "pid": pid,
+                "name": name,
+                "parameters": params_display,
+            })
+        if not rows:
+            st.info("No running processes.")
+        else:
+            edited = st.data_editor(
+                rows,
+                hide_index=True,
+                num_rows="fixed",
+                column_config={
+                    "select": st.column_config.CheckboxColumn("Select", help="Mark to terminate"),
+                    "pid": st.column_config.NumberColumn("PID"),
+                    "name": st.column_config.TextColumn("Name"),
+                    "parameters": st.column_config.TextColumn("Parameters"),
+                },
+                key="running_procs_editor",
+            )
+            # Collect selected PIDs
+            selected_pids = [int(r.get("pid")) for r in edited if r.get("select")]
+            c1, c2 = st.columns([1, 3])
+            with c1:
+                if st.button("Terminate Selected", key="terminate_selected_btn"):
+                    if not selected_pids:
+                        st.warning("No processes selected.")
+                    else:
+                        ok_list, fail_list = [], []
+                        for spid in selected_pids:
+                            try:
+                                ok = terminate_process(spid)
+                                (ok_list if ok else fail_list).append(spid)
+                            except Exception:
+                                fail_list.append(spid)
+                        if ok_list:
+                            st.success(f"Terminated: {', '.join(str(p) for p in ok_list)}")
+                        if fail_list:
+                            st.warning(f"Failed/Not found: {', '.join(str(p) for p in fail_list)}")
+                        try:
+                            st.rerun()
+                        except Exception:
+                            try:
+                                st.experimental_rerun()
+                            except Exception:
+                                pass
+            with c2:
+                st.caption("Tip: Use the checkboxes to select one or more processes, then click 'Terminate Selected'.")
+    except Exception as e:
+        logging.getLogger("dashboard").exception("Failed to render running processes table")
+        st.error(f"Failed to show running processes: {e}")
+
+    # --- Logs Maintenance ---
+    st.subheader("Logs Maintenance")
+    st.caption("Manage logs stored under your home at ~/.dashboard/logs. Clearing logs does not stop active processes.")
+    col_lm1, col_lm2 = st.columns([1, 3])
+    with col_lm1:
+        if st.button("Clear All Logs", key="tools_clear_all_logs_btn"):
+            cleared = {
+                "dashboard_log": False,
+                "rotated_logs": 0,
+                "run_logs": 0,
+            }
+            # Clear main dashboard log by truncating file; preserve file for handler
+            try:
+                os.makedirs(LOG_DIR, exist_ok=True)
+                if os.path.exists(LOG_FILE):
+                    with open(LOG_FILE, "w", encoding="utf-8") as f:
+                        f.write("")
+                    cleared["dashboard_log"] = True
+            except Exception:
+                logging.getLogger("dashboard").exception("Failed to truncate dashboard.log")
+            # Remove rotated dashboard logs (e.g., dashboard.log.1, .2)
+            try:
+                for name in os.listdir(LOG_DIR):
+                    if name.startswith("dashboard.log") and name != os.path.basename(LOG_FILE):
+                        path = os.path.join(LOG_DIR, name)
+                        try:
+                            if os.path.isfile(path):
+                                os.remove(path)
+                                cleared["rotated_logs"] += 1
+                        except Exception:
+                            pass
+            except Exception:
+                logging.getLogger("dashboard").exception("Failed to remove rotated dashboard logs")
+            # Clear run logs under ~/.dashboard/logs/runs
+            runs_dir = os.path.join(LOG_DIR, "runs")
+            try:
+                if os.path.isdir(runs_dir):
+                    for name in os.listdir(runs_dir):
+                        path = os.path.join(runs_dir, name)
+                        try:
+                            if os.path.isfile(path):
+                                os.remove(path)
+                                cleared["run_logs"] += 1
+                        except Exception:
+                            pass
+            except Exception:
+                logging.getLogger("dashboard").exception("Failed to clear run logs")
+            st.success(
+                f"Cleared logs: dashboard.log={'yes' if cleared['dashboard_log'] else 'no'}, "
+                f"rotated={cleared['rotated_logs']}, runs={cleared['run_logs']}"
+            )
+    with col_lm2:
+        st.caption("This will empty the main dashboard log and delete all files in ~/.dashboard/logs/runs. Rotated dashboard logs are removed as well.")
+
 
 def main() -> None:
     # Branding: Operational Dashboard with icon
@@ -1661,7 +2076,10 @@ def main() -> None:
         ) or "Operational Dashboard"
     except Exception:
         dashboard_name = "Operational Dashboard"
-    st.set_page_config(page_title=dashboard_name, layout="wide", page_icon="📈")
+    # Use project logo as the page icon if available; fall back to an emoji
+    logo_path = os.path.join(DASHBOARD_DIR, "assets", "logo.svg")
+    page_icon_ref = logo_path if os.path.exists(logo_path) else "📈"
+    st.set_page_config(page_title=dashboard_name, layout="wide", page_icon=page_icon_ref)
     # Hide Streamlit's Deploy/Share control in the toolbar
     st.markdown(
         """
@@ -1674,7 +2092,7 @@ def main() -> None:
         """,
         unsafe_allow_html=True,
     )
-    logo_path = os.path.join(DASHBOARD_DIR, "assets", "logo.svg")
+    # Logo displayed in header (separate from page icon)
     col_logo, col_title = st.columns([1, 4])
     with col_logo:
         try:
@@ -1686,7 +2104,14 @@ def main() -> None:
     with col_title:
         st.markdown(f"# {dashboard_name}")
     setup_logging()
-    logging.getLogger("dashboard").info("Dashboard started")
+    # Log startup only once per Streamlit session to avoid duplicate entries on reruns
+    try:
+        if not st.session_state.get("_dashboard_started_once"):
+            logging.getLogger("dashboard").info("Dashboard started")
+            st.session_state["_dashboard_started_once"] = True
+    except Exception:
+        # Fallback: log once without session guard
+        logging.getLogger("dashboard").info("Dashboard started")
 
     # Initialize logs store in session state
     if "run_logs" not in st.session_state:
@@ -1702,7 +2127,7 @@ def main() -> None:
         existing_envs = list_env_names() or ["DEV", "UAT", "PROD"]
         st.session_state["selected_env"] = existing_envs[0]
 
-    tab_runner, tab_logs, tab_config, tab_recon, tab_tools = st.tabs(["Script Runners", "Logs", "Config", "Reconciliation", "Tools"])
+    tab_runner, tab_logs, tab_config, tab_recon, tab_tools, tab_docs = st.tabs(["Script Runners", "Logs", "Config", "Reconciliation", "Tools", "Docs"])
 
     # --- Script Runners Tab ---
     with tab_runner:
@@ -1723,6 +2148,10 @@ def main() -> None:
     # --- Tools Tab ---
     with tab_tools:
         render_tools_tab()
+
+    # --- Docs Tab (always last) ---
+    with tab_docs:
+        render_readme_tab()
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ Usage:
 """
 
 import argparse
+import time
 from datetime import datetime, date
 
 
@@ -32,6 +33,10 @@ def main(start_date: date, end_date: date) -> None:
     Replace this placeholder body with your actual model logic.
     """
     print(f"[first_model] Running main with start_date={start_date} end_date={end_date}")
+    # Simulate a long-running task with a 30-second timer
+    print("[first_model] Starting 30-second timer...")
+    time.sleep(30)
+    print("[first_model] 30-second timer complete.")
 
 
 if __name__ == "__main__":
