@@ -1,8 +1,6 @@
 
 # Experimental project expore statistical and ML techniques for financial analysis. 
 
-See `RUN_DASHBOARD.md` for small helper scripts to run the Streamlit dashboard (examples for bash, PowerShell and CMD).
-
 ### Installation
 
 Python dependencies are managed by [pip-tools](https://pypi.org/project/pip-tools/). You need to create conda or venv for your env first.
