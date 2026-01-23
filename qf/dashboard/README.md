@@ -70,7 +70,6 @@ This dashboard is organized into tabs. Here’s what each tab contains and how t
 ### Tools
 - Check Environment: runs `check_environment.py` (from a parent `tools/` folder) inside the selected conda env and shows output.
 - Jupyter Notebook: start a Jupyter server in a chosen directory and env; detached with live tails.
-- Terminal Script: run any shell command (optionally inside conda); detached with live tails and termination controls.
 - Kill Process by PID: send termination signals manually.
 - Terminate All: stop all tracked processes started from the dashboard.
 - Running Processes: interactive table with multi-select terminate.

@@ -9,6 +9,9 @@ runOnSave = true
 # Example values:
 #   "runners"                  -> local package qf/dashboard/runners
 #   "myproj.tools.runners"     -> nested package path
-runners_package = "qf.dashboard.runners"
+runners_package = [
+    "qf.dashboard.runners",
+    "qf.tools"
+    ]
 dashboard_name = "Operational Dashboard"
 default_notebook_dir = "~"

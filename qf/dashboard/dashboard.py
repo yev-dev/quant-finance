@@ -443,53 +443,29 @@ def render_script_runners_tab() -> None:
 
             no_argparse = bool(working.get("noArgparse"))
             if not no_argparse:
-                st.subheader("Arguments")
+                # Show discovered arguments as a read-only summary. Editing arguments in the
+                # config preset is disabled to avoid accidental mismatches with the module's
+                # argparse signature. To change arguments, update the module source instead.
+                st.subheader("Arguments (read-only)")
                 if "args" not in working or not isinstance(working.get("args"), list):
                     working["args"] = []
-                # Add new argument row
-                if st.button("Add argument", key="cfg_add_arg"):
-                    working["args"].append({
-                        "name": "",
-                        "flag": "",
-                        "type": "string",
-                        "value": "",
-                        "help": "",
+                # Prepare a simple table view
+                rows = []
+                for a in working.get("args", []):
+                    rows.append({
+                        "name": a.get("name", ""),
+                        "flag": a.get("flag", ""),
+                        "type": a.get("type", "string"),
+                        "default": a.get("value", ""),
+                        "help": a.get("help", ""),
                     })
-                    st.session_state[work_key] = working
+                if not rows:
+                    st.info("No arguments detected for this module.")
+                else:
                     try:
-                        st.rerun()
+                        st.dataframe(rows, use_container_width=True)
                     except Exception:
-                        try:
-                            st.experimental_rerun()
-                        except Exception:
-                            pass
-                # Render editable rows
-                to_delete = []
-                for i, a in enumerate(list(working.get("args", []))):
-                    col1, col2, col3 = st.columns([3, 2, 1])
-                    with col1:
-                        a_name = st.text_input("name", value=str(a.get("name", "")), key=f"cfg_arg_{i}_name")
-                        a_flag = st.text_input("flag", value=str(a.get("flag", "")), key=f"cfg_arg_{i}_flag")
-                        a_type = st.text_input("type", value=str(a.get("type", "string")), key=f"cfg_arg_{i}_type")
-                    with col2:
-                        a_value = st.text_input("value", value=str(a.get("value", "")), key=f"cfg_arg_{i}_value")
-                        a_help = st.text_input("help", value=str(a.get("help", "")), key=f"cfg_arg_{i}_help")
-                    with col3:
-                        if st.button("Remove", key=f"cfg_arg_{i}_remove"):
-                            to_delete.append(i)
-                    # Apply edits back into working copy
-                    working["args"][i] = {
-                        "name": a_name,
-                        "flag": a_flag,
-                        "type": a_type,
-                        "value": a_value,
-                        "help": a_help,
-                    }
-                for idx in sorted(to_delete, reverse=True):
-                    try:
-                        del working["args"][idx]
-                    except Exception:
-                        pass
+                        st.write(rows)
             else:
                 st.subheader("Non-argparse inputs")
                 if "inputs" not in working or not isinstance(working.get("inputs"), dict):
@@ -561,6 +537,11 @@ def render_script_runners_tab() -> None:
             st.subheader("Raw JSON editor (advanced)")
             st.caption("Edit the full JSON preset. Useful for custom structures beyond the guided form.")
             # Keep a separate text buffer in session so typing doesn't immediately overwrite the working copy
+            # Avoid passing a `value=` argument when the widget key is managed via session_state;
+            # Streamlit raises if a widget is created with a default value while the same key
+            # already exists in session_state. Initialize the session key only when missing,
+            # then let the widget read/write the session_state automatically by using the key
+            # without supplying `value=`.
             raw_key = f"cfg_raw_json_{module_name}"
             if raw_key not in st.session_state:
                 try:
@@ -568,7 +549,8 @@ def render_script_runners_tab() -> None:
                 except Exception:
                     st.session_state[raw_key] = "{}"
             # Increase editor height by ~30% for better visibility
-            raw_text = st.text_area("JSON", value=st.session_state.get(raw_key, "{}"), height=312, key=raw_key)
+            # Note: do NOT pass `value=` here when using `key=` tied to session_state.
+            raw_text = st.text_area("JSON", height=312, key=raw_key)
             col_rj1, col_rj2 = st.columns([1, 1])
             with col_rj1:
                 if st.button("Validate JSON", key=f"cfg_raw_validate_{module_name}"):
@@ -718,7 +700,11 @@ def render_script_runners_tab() -> None:
                                 logging.getLogger("dashboard").exception("Run with config failed for module %s", module_name)
                                 st.error(f"Failed to start subprocess: {e}")
                             else:
-                                st.session_state["active_run"] = {**info, "module": module_name, "cmd": cmd_str_cfg, "detached": True}
+                                # Prevent identical config-based run duplicates
+                                if any(r.get("cmd") == cmd_str_cfg for r in st.session_state.get("active_runs", [])):
+                                    st.warning("An identical run (same module + parameters) is already active. Change parameters to run concurrently.")
+                                else:
+                                    st.session_state.setdefault("active_runs", []).append({**info, "module": module_name, "cmd": cmd_str_cfg, "detached": True})
                                 try:
                                     logging.getLogger("dashboard").info(
                                         "Started run (config): module=%s pid=%s stdout=%s stderr=%s",
@@ -806,10 +792,12 @@ def render_script_runners_tab() -> None:
         if not specs:
             st.markdown("#### Non-argparse inputs (optional)")
             st.caption("Any string formats are accepted; values are concatenated and separated with ':' by the module.")
-            cob_date = st.text_input("COB_DATE (any format)", value="", placeholder="e.g., 2025/01/02 or Jan-02-2025")
-            run_date = st.text_input("RUN_DATE (any format)", value="", placeholder="e.g., 2025/01/01 or Jan-01-2025")
-            start_date = st.text_input("START_DATE (any format)", value="", placeholder="e.g., 2025.01.01")
-            end_date = st.text_input("END_DATE (any format)", value="", placeholder="e.g., 2025_12_31")
+            # Show RUN_DATE before COB_DATE per UI preference
+            # Remove example date formats from placeholders to avoid prescriptive examples
+            run_date = st.text_input("RUN_DATE (any format)", value="")
+            cob_date = st.text_input("COB_DATE (any format)", value="")
+            start_date = st.text_input("START_DATE (any format)", value="")
+            end_date = st.text_input("END_DATE (any format)", value="")
             pass_mode = st.radio(
                 "Pass values as",
                 ["argv tokens", "environment variables"],
@@ -858,141 +846,140 @@ def render_script_runners_tab() -> None:
                 st.markdown("**Parameter values provided:**")
                 st.json(values if values else provided)
 
-    # Show active run section if any
-    if "active_run" in st.session_state and st.session_state["active_run"]:
-        active = st.session_state["active_run"]
-        pid = active.get("pid")
-        status = get_status(pid)
-        if status.get("running"):
-            st.info(f"Module '{active.get('module')}' is running (PID {pid}).")
-            col1, col2 = st.columns([1, 3])
-            with col1:
-                # Auto-attach toggle
-                enabled = auto_attach_enabled(pid)
-                auto_on = st.checkbox("Auto attach to dashboard log", value=enabled, key=f"auto_attach_run_{pid}")
-                if auto_on and not enabled:
-                    try:
-                        enable_auto_attach(pid, label=active.get("module"), interval=AUTO_ATTACH_INTERVAL)
-                    except Exception:
-                        pass
-                elif (not auto_on) and enabled:
-                    try:
-                        disable_auto_attach(pid)
-                    except Exception:
-                        pass
-                if st.button("Terminate Run", key="terminate_btn"):
-                    terminate_process(pid)
-                    st.success("Termination signal sent.")
-                    # Immediately refresh UI so the running status updates
-                    try:
-                        st.rerun()
-                    except Exception:
+    # Show active runs (zero or more). We track them in `st.session_state["active_runs"]`.
+    if st.session_state.get("active_runs"):
+        # Iterate over a copy because we may remove finished runs while iterating
+        for active in list(st.session_state.get("active_runs", [])):
+            pid = active.get("pid")
+            status = get_status(pid)
+            if status.get("running"):
+                st.info(f"Module '{active.get('module')}' is running (PID {pid}).")
+                col1, col2 = st.columns([1, 3])
+                with col1:
+                    # Auto-attach toggle (keyed by PID)
+                    enabled = auto_attach_enabled(pid)
+                    auto_on = st.checkbox("Auto attach to dashboard log", value=enabled, key=f"auto_attach_run_{pid}")
+                    if auto_on and not enabled:
                         try:
-                            st.experimental_rerun()
+                            enable_auto_attach(pid, label=active.get("module"), interval=AUTO_ATTACH_INTERVAL)
                         except Exception:
                             pass
-                if st.button("Attach tail to dashboard log", key="attach_run_tail_btn"):
-                    ok = attach_log_tail_to_dashboard(pid, max_lines=200, label=active.get("module"))
-                    if ok:
-                        st.success("Attached current tail to dashboard.log")
-                    else:
-                        st.error("Failed to attach log tail for this PID")
-                if st.button("Refresh Log", key="refresh_run_log_btn"):
-                    # Rerun to reread tail files and update UI
-                    try:
-                        st.rerun()
-                    except Exception:
+                    elif (not auto_on) and enabled:
                         try:
-                            st.experimental_rerun()
+                            disable_auto_attach(pid)
                         except Exception:
                             pass
-            with col2:
-                # Show logs (tail) regardless of detach mode; combine or separate per preference
-                st.caption("Log generation (tail)")
-                out_path = active.get("stdout_path")
-                err_path = active.get("stderr_path")
-                combined_tail = ""
+                    if st.button("Terminate Run", key=f"terminate_btn_{pid}"):
+                        terminate_process(pid)
+                        st.success("Termination signal sent.")
+                        try:
+                            st.rerun()
+                        except Exception:
+                            try:
+                                st.experimental_rerun()
+                            except Exception:
+                                pass
+                    if st.button("Attach tail to dashboard log", key=f"attach_run_tail_btn_{pid}"):
+                        ok = attach_log_tail_to_dashboard(pid, max_lines=200, label=active.get("module"))
+                        if ok:
+                            st.success("Attached current tail to dashboard.log")
+                        else:
+                            st.error("Failed to attach log tail for this PID")
+                    if st.button("Refresh Log", key=f"refresh_run_log_btn_{pid}"):
+                        try:
+                            st.rerun()
+                        except Exception:
+                            try:
+                                st.experimental_rerun()
+                            except Exception:
+                                pass
+                with col2:
+                    # Show logs (tail) regardless of detach mode; combine or separate per preference
+                    st.caption("Log generation (tail)")
+                    out_path = active.get("stdout_path")
+                    err_path = active.get("stderr_path")
+                    combined_tail = ""
+                    try:
+                        if out_path and os.path.exists(out_path):
+                            with open(out_path, "r", encoding="utf-8", errors="ignore") as f:
+                                out_lines = f.readlines()[-200:]
+                            combined_tail += "".join(out_lines)
+                    except Exception:
+                        pass
+                    try:
+                        if err_path and os.path.exists(err_path):
+                            with open(err_path, "r", encoding="utf-8", errors="ignore") as f:
+                                err_lines = f.readlines()[-200:]
+                            if err_lines:
+                                if combined_tail:
+                                    combined_tail += "\n\nSTDERR (tail):\n"
+                                combined_tail += "".join(err_lines)
+                    except Exception:
+                        pass
+                    st.text_area("Stdout", value=combined_tail or "(no output yet)", height=300, key=f"live_log_{pid}", label_visibility="collapsed")
+            else:
+                # Finished; record log entry and remove from active_runs
+                rc = status.get("returncode")
+                out_text = ""
+                err_text = ""
                 try:
-                    if out_path and os.path.exists(out_path):
-                        with open(out_path, "r", encoding="utf-8", errors="ignore") as f:
-                            out_lines = f.readlines()[-200:]
-                        combined_tail += "".join(out_lines)
+                    if active.get("stdout_path") and os.path.exists(active["stdout_path"]):
+                        with open(active["stdout_path"], "r", encoding="utf-8", errors="ignore") as f:
+                            out_text = f.read()
                 except Exception:
                     pass
                 try:
-                    if err_path and os.path.exists(err_path):
-                        with open(err_path, "r", encoding="utf-8", errors="ignore") as f:
-                            err_lines = f.readlines()[-200:]
-                        if err_lines:
-                            if combined_tail:
-                                combined_tail += "\n\nSTDERR (tail):\n"
-                            combined_tail += "".join(err_lines)
+                    if active.get("stderr_path") and os.path.exists(active["stderr_path"]):
+                        with open(active["stderr_path"], "r", encoding="utf-8", errors="ignore") as f:
+                            err_text = f.read()
                 except Exception:
                     pass
-                st.text_area("Stdout", value=combined_tail or "(no output yet)", height=300, key=f"live_log_{pid}", label_visibility="collapsed")
-        else:
-            # Finished; record log entry and clear active
-            rc = status.get("returncode")
-            out_text = ""
-            err_text = ""
-            try:
-                if active.get("stdout_path") and os.path.exists(active["stdout_path"]):
-                    with open(active["stdout_path"], "r", encoding="utf-8", errors="ignore") as f:
-                        out_text = f.read()
-            except Exception:
-                pass
-            try:
-                if active.get("stderr_path") and os.path.exists(active["stderr_path"]):
-                    with open(active["stderr_path"], "r", encoding="utf-8", errors="ignore") as f:
-                        err_text = f.read()
-            except Exception:
-                pass
-            st.success(f"Run finished (rc={rc}).")
-            # Log completion details with timing if available
-            try:
-                started_at = active.get("started_at")
-                elapsed_s = None
-                if started_at:
-                    try:
-                        dt0 = datetime.fromisoformat(str(started_at))
-                        elapsed_s = (datetime.now() - dt0).total_seconds()
-                    except Exception:
-                        elapsed_s = None
-                logging.getLogger("dashboard").info(
-                    "Run completed: module=%s rc=%s elapsed=%s cmd=%s",
-                    active.get("module"),
-                    rc,
-                    f"{elapsed_s:.3f}s" if isinstance(elapsed_s, float) else "n/a",
-                    active.get("cmd"),
-                )
-            except Exception:
-                pass
-            st.session_state["run_logs"].append({
-                "time": datetime.now().isoformat(timespec="seconds"),
-                "module": active.get("module"),
-                "cmd": active.get("cmd"),
-                "returncode": rc,
-                "stdout": out_text,
-                "stderr": err_text,
-            })
-            # Show outputs once (unless run was detached)
-            # Show once (unless run was detached), combined or separate per preference
-            if not active.get("detached"):
-                combined = out_text or ""
-                if err_text:
-                    if combined:
-                        combined += "\n\nSTDERR:\n"
-                    combined += err_text
-                st.subheader("Log generation")
-                st.text_area("Stdout", value=combined or "(no output)", height=400, key=f"final_log_{pid}", label_visibility="collapsed")
-            # Attach tail to dashboard log on completion (best-effort)
-            try:
-                attach_log_tail_to_dashboard(pid, max_lines=400, label=active.get("module"))
-            except Exception:
-                pass
-            st.session_state["active_run"] = None
+                st.success(f"Run finished (rc={rc}).")
+                try:
+                    started_at = active.get("started_at")
+                    elapsed_s = None
+                    if started_at:
+                        try:
+                            dt0 = datetime.fromisoformat(str(started_at))
+                            elapsed_s = (datetime.now() - dt0).total_seconds()
+                        except Exception:
+                            elapsed_s = None
+                    logging.getLogger("dashboard").info(
+                        "Run completed: module=%s rc=%s elapsed=%s cmd=%s",
+                        active.get("module"),
+                        rc,
+                        f"{elapsed_s:.3f}s" if isinstance(elapsed_s, float) else "n/a",
+                        active.get("cmd"),
+                    )
+                except Exception:
+                    pass
+                st.session_state["run_logs"].append({
+                    "time": datetime.now().isoformat(timespec="seconds"),
+                    "module": active.get("module"),
+                    "cmd": active.get("cmd"),
+                    "returncode": rc,
+                    "stdout": out_text,
+                    "stderr": err_text,
+                })
+                if not active.get("detached"):
+                    combined = out_text or ""
+                    if err_text:
+                        if combined:
+                            combined += "\n\nSTDERR:\n"
+                        combined += err_text
+                    st.subheader("Log generation")
+                    st.text_area("Stdout", value=combined or "(no output)", height=400, key=f"final_log_{pid}", label_visibility="collapsed")
+                try:
+                    attach_log_tail_to_dashboard(pid, max_lines=400, label=active.get("module"))
+                except Exception:
+                    pass
+                # Remove finished run from session list
+                try:
+                    st.session_state["active_runs"] = [r for r in st.session_state.get("active_runs", []) if r.get("pid") != pid]
+                except Exception:
+                    st.session_state["active_runs"] = []
 
-    if run_btn and not st.session_state.get("active_run"):
+    if run_btn:
         conda_env = env_vars.get("CONDA_ENV") or "qf"
         exists, detail = conda_env_exists(conda_env)
         if not exists:
@@ -1018,6 +1005,11 @@ def render_script_runners_tab() -> None:
                     # Inject as environment variables
                     effective_env.update(provided)
         cmd_str = " ".join(shlex.quote(c) for c in cmd)
+        # Prevent starting an identical run (same module + identical parameters) while
+        # allow starting the same module concurrently when parameters differ.
+        if any(r.get("cmd") == cmd_str for r in st.session_state.get("active_runs", [])):
+            st.warning("An identical run is already active (same module and parameters).\nTo run concurrently, change the parameters.")
+            return
         st.write("Command:")
         st.code(cmd_str)
         # Log run request details
@@ -1040,12 +1032,16 @@ def render_script_runners_tab() -> None:
                 logging.getLogger("dashboard").exception("Run failed for module %s", module_name)
                 st.error(f"Failed to start subprocess: {e}")
                 return
-            st.session_state["active_run"] = {
+            # Append to active_runs so multiple concurrent runs are supported
+            if any(r.get("cmd") == cmd_str for r in st.session_state.get("active_runs", [])):
+                st.warning("An identical run (same module + parameters) is already active. Change parameters to run concurrently.")
+                return
+            st.session_state.setdefault("active_runs", []).append({
                 **info,
                 "module": module_name,
                 "cmd": cmd_str,
                 "detached": True,
-            }
+            })
             # Log start information with PID and log paths
             try:
                 logging.getLogger("dashboard").info(
@@ -1150,6 +1146,7 @@ def render_script_runners_tab() -> None:
         st.session_state["run_logs"] = []
         st.success("Logs cleared.")
 
+    # (Removed here — running processes are now shown under Script Runners tab)
 
 def render_logs_tab() -> None:
     st.header("Logs")
@@ -1595,14 +1592,32 @@ def render_tools_tab() -> None:
         value=False,
         key="nb_open_browser",
         help="If enabled, Jupyter will attempt to open a browser window when the server starts.")
-    start_nb = st.button("Start Jupyter Notebook")
-    if start_nb:
+    # Detect whether JupyterLab is available in the chosen conda env
+    lab_available = False
+    try:
+        # fast check: try `jupyter lab --version` inside the conda env
+        proc_check = run_subprocess(["conda", "run", "-n", conda_env, "jupyter", "lab", "--version"])
+        lab_available = proc_check.returncode == 0
+    except Exception:
+        lab_available = False
+
+    # Show Start Notebook button, then (if available) Start JupyterLab below it
+    start_nb = st.button("Start Jupyter Notebook", key="start_nb_btn")
+    if lab_available:
+        start_lab = st.button("Start JupyterLab", key="start_lab_btn")
+    else:
+        st.write("JupyterLab not detected in selected environment")
+
+    if start_nb or (locals().get("start_lab", False)):
         exists, detail = conda_env_exists(conda_env)
         if not exists:
             st.error(f"Conda environment '{conda_env}' not found. Details: {detail}")
         else:
             # Compose Jupyter start command and optionally open browser
-            cmd = ["conda", "run", "-n", conda_env, "jupyter", "notebook"]
+            if start_nb:
+                cmd = ["conda", "run", "-n", conda_env, "jupyter", "notebook"]
+            else:
+                cmd = ["conda", "run", "-n", conda_env, "jupyter", "lab"]
             if not open_in_browser:
                 cmd.append("--no-browser")
             try:
@@ -1613,12 +1628,12 @@ def render_tools_tab() -> None:
                 st.caption("Open the printed URL from logs (uploads/logs). If using token authentication, copy token from logs.")
                 # Track active Jupyter session to enable termination and live tails
                 try:
-                    st.session_state["active_jupyter"] = {
-                        **info,
-                        "cmd": " ".join(shlex.quote(c) for c in cmd),
-                        "cwd": start_dir,
-                        "detached": True,
-                    }
+                    # Append to active_runs so Jupyter gets tracked alongside other runs
+                    cmd_str = " ".join(shlex.quote(c) for c in cmd)
+                    if any(r.get("cmd") == cmd_str for r in st.session_state.get("active_runs", [])):
+                        st.warning("An identical Jupyter run is already active. Change options to run another instance.")
+                    else:
+                        st.session_state.setdefault("active_runs", []).append({**info, "module": "Jupyter", "cmd": cmd_str, "cwd": start_dir, "detached": True})
                 except Exception:
                     pass
                 # Start auto attach by default
@@ -1642,229 +1657,11 @@ def render_tools_tab() -> None:
                 logging.getLogger("dashboard").exception("Failed to start Jupyter Notebook")
                 st.error(f"Failed to start Jupyter Notebook: {e}")
 
-    # --- Terminal Script Runner ---
-    st.subheader("Terminal Script")
-    st.caption("Run any shell command in a chosen directory. Optionally run inside the selected conda environment.")
-    term_envs = list_env_names() or ["DEV", "UAT", "PROD"]
-    if st.session_state.get("selected_env") not in term_envs:
-        st.session_state["selected_env"] = term_envs[0]
-    term_env = st.selectbox(
-        "Environment",
-        term_envs,
-        index=term_envs.index(st.session_state["selected_env"]),
-        key="tools_terminal_env_select",
-    )
-    st.session_state["selected_env"] = term_env
-    term_env_vars = get_env_for(term_env)
-    term_conda_env = term_env_vars.get("CONDA_ENV") or "qf"
-    run_in_conda = st.checkbox("Run in conda env", value=True, help="Wrap the command with 'conda run -n <env> bash -lc'.")
-    # Command and working directory
-    cmd_key = "terminal_cmd"
-    cwd_key = "terminal_cwd"
-    default_cmd = st.session_state.get(cmd_key, "echo Hello from terminal")
-    default_cwd = st.session_state.get(cwd_key, DASHBOARD_DIR)
-    user_cmd = st.text_input("Command", value=default_cmd, key=cmd_key)
-    term_cwd = st.text_input("Working directory", value=default_cwd, key=cwd_key)
-    start_term = st.button("Run in Terminal")
-    if start_term:
-        try:
-            if run_in_conda:
-                exists, detail = conda_env_exists(term_conda_env)
-                if not exists:
-                    st.error(f"Conda environment '{term_conda_env}' not found. Details: {detail}")
-                else:
-                    cmd = ["conda", "run", "-n", term_conda_env, "bash", "-lc", user_cmd]
-            else:
-                cmd = ["bash", "-lc", user_cmd]
-            prefix = f"{datetime.now():%Y%m%d-%H%M%S}_terminal"
-            info = start_subprocess(cmd, cwd=term_cwd or DASHBOARD_DIR, extra_env=term_env_vars, log_prefix=prefix)
-        except Exception as e:
-            logging.getLogger("dashboard").exception("Failed to start terminal command")
-            st.error(f"Failed to start command: {e}")
-        else:
-            st.success(f"Terminal command started (PID {info['pid']}) in '{term_cwd or DASHBOARD_DIR}'.")
-            try:
-                st.session_state["active_terminal"] = {
-                    **info,
-                    "cmd": user_cmd,
-                    "cwd": term_cwd or DASHBOARD_DIR,
-                    "detached": True,
-                }
-            except Exception:
-                pass
-            # Initial tail combined/separate
-            out_path = info.get("stdout_path")
-            err_path = info.get("stderr_path")
-            st.subheader("Log generation (tail)")
-            combined_tail = ""
-            try:
-                if out_path and os.path.exists(out_path):
-                    with open(out_path, "r", encoding="utf-8", errors="ignore") as f:
-                        out_lines = f.readlines()[-200:]
-                    combined_tail += "".join(out_lines)
-            except Exception:
-                pass
-            try:
-                if err_path and os.path.exists(err_path):
-                    with open(err_path, "r", encoding="utf-8", errors="ignore") as f:
-                        err_lines = f.readlines()[-200:]
-                    if err_lines:
-                        if combined_tail:
-                            combined_tail += "\n\nSTDERR (tail):\n"
-                        combined_tail += "".join(err_lines)
-            except Exception:
-                pass
-            st.text_area("Stdout", value=combined_tail or "(no output yet)", height=300, key=_next_ui_key("initial_terminal_tail"), label_visibility="collapsed")
-            # Start auto attach by default
-            try:
-                enable_auto_attach(info.get("pid"), label="Terminal", interval=2.0)
-            except Exception:
-                pass
-
-    # Active terminal section
-    if st.session_state.get("active_terminal"):
-        at = st.session_state["active_terminal"]
-        pid = at.get("pid")
-        st.subheader("Active Terminal Command")
-        status = get_status(pid)
-        if status.get("running"):
-            st.info(f"Command is running (PID {pid}).")
-            col_tt1, col_tt2 = st.columns([1, 3])
-            with col_tt1:
-                enabled = auto_attach_enabled(pid)
-                auto_on = st.checkbox("Auto attach to dashboard log", value=enabled, key=f"auto_attach_terminal_{pid}")
-                if auto_on and not enabled:
-                    try:
-                        enable_auto_attach(pid, label="Terminal", interval=2.0)
-                    except Exception:
-                        pass
-                elif (not auto_on) and enabled:
-                    try:
-                        disable_auto_attach(pid)
-                    except Exception:
-                        pass
-                if st.button("Terminate Command", key="terminate_terminal_btn"):
-                    terminate_process(pid)
-                    st.success("Termination signal sent.")
-                    try:
-                        st.rerun()
-                    except Exception:
-                        try:
-                            st.experimental_rerun()
-                        except Exception:
-                            pass
-                if st.button("Attach tail to dashboard log", key="attach_terminal_tail_btn"):
-                    ok = attach_log_tail_to_dashboard(pid, max_lines=200, label="Terminal")
-                    if ok:
-                        st.success("Attached current tail to dashboard.log")
-                    else:
-                        st.error("Failed to attach log tail for this PID")
-                if st.button("Refresh Log", key="refresh_terminal_log_btn"):
-                    try:
-                        st.rerun()
-                    except Exception:
-                        try:
-                            st.experimental_rerun()
-                        except Exception:
-                            pass
-            with col_tt2:
-                st.caption("Log generation (tail)")
-                out_path = at.get("stdout_path")
-                err_path = at.get("stderr_path")
-                combined_tail = ""
-                try:
-                    if out_path and os.path.exists(out_path):
-                        with open(out_path, "r", encoding="utf-8", errors="ignore") as f:
-                            out_lines = f.readlines()[-200:]
-                        combined_tail += "".join(out_lines)
-                except Exception:
-                    pass
-                try:
-                    if err_path and os.path.exists(err_path):
-                        with open(err_path, "r", encoding="utf-8", errors="ignore") as f:
-                            err_lines = f.readlines()[-200:]
-                        if err_lines:
-                            if combined_tail:
-                                combined_tail += "\n\nSTDERR (tail):\n"
-                            combined_tail += "".join(err_lines)
-                except Exception:
-                    pass
-                st.text_area("Stdout", value=combined_tail or "(no output yet)", height=300, key=_next_ui_key("live_terminal_tail"), label_visibility="collapsed")
-        else:
-            st.success(f"Command finished (rc={status.get('returncode')}).")
-            st.session_state["active_terminal"] = None
-    # Show Active Jupyter section if any
-    if st.session_state.get("active_jupyter"):
-        aj = st.session_state["active_jupyter"]
-        pid = aj.get("pid")
-        st.subheader("Active Jupyter")
-        status = get_status(pid)
-        if status.get("running"):
-            st.info(f"Jupyter server is running (PID {pid}).")
-            col_tj1, col_tj2 = st.columns([1, 3])
-            with col_tj1:
-                enabled = auto_attach_enabled(pid)
-                auto_on = st.checkbox("Auto attach to dashboard log", value=enabled, key=f"auto_attach_jupyter_{pid}")
-                if auto_on and not enabled:
-                    try:
-                        enable_auto_attach(pid, label="Jupyter", interval=AUTO_ATTACH_INTERVAL)
-                    except Exception:
-                        pass
-                elif (not auto_on) and enabled:
-                    try:
-                        disable_auto_attach(pid)
-                    except Exception:
-                        pass
-                if st.button("Terminate Jupyter", key="terminate_jupyter_btn"):
-                    terminate_process(pid)
-                    st.success("Termination signal sent to Jupyter.")
-                    try:
-                        st.rerun()
-                    except Exception:
-                        try:
-                            st.experimental_rerun()
-                        except Exception:
-                            pass
-                if st.button("Attach tail to dashboard log", key="attach_jupyter_tail_btn"):
-                    ok = attach_log_tail_to_dashboard(pid, max_lines=200, label="Jupyter")
-                    if ok:
-                        st.success("Attached current tail to dashboard.log")
-                    else:
-                        st.error("Failed to attach log tail for this PID")
-                if st.button("Refresh Log", key="refresh_jupyter_log_btn"):
-                    try:
-                        st.rerun()
-                    except Exception:
-                        try:
-                            st.experimental_rerun()
-                        except Exception:
-                            pass
-            with col_tj2:
-                st.caption("Log generation (tail)")
-                out_path = aj.get("stdout_path")
-                err_path = aj.get("stderr_path")
-                combined_tail = ""
-                try:
-                    if out_path and os.path.exists(out_path):
-                        with open(out_path, "r", encoding="utf-8", errors="ignore") as f:
-                            out_lines = f.readlines()[-200:]
-                        combined_tail += "".join(out_lines)
-                except Exception:
-                    pass
-                try:
-                    if err_path and os.path.exists(err_path):
-                        with open(err_path, "r", encoding="utf-8", errors="ignore") as f:
-                            err_lines = f.readlines()[-200:]
-                        if err_lines:
-                            if combined_tail:
-                                combined_tail += "\n\nSTDERR (tail):\n"
-                            combined_tail += "".join(err_lines)
-                except Exception:
-                    pass
-                st.text_area("Stdout", value=combined_tail or "(no output yet)", height=300, key=_next_ui_key("live_jupyter_tail"), label_visibility="collapsed")
-        else:
-            st.success(f"Jupyter server finished (rc={status.get('returncode')}).")
-            st.session_state["active_jupyter"] = None
+    # Terminal Script Runner removed: terminal-style ad-hoc command execution is no longer supported
+    # to keep the dashboard focused on module-based runs and managed subprocesses.
+    # Active Jupyter runs are shown alongside other active runs in `active_runs`.
+    # The `active_runs` UI above provides per-PID controls and log tails, so no separate
+    # Jupyter-specific section is required here.
 
     # --- Global termination controls ---
     st.subheader("Kill Process by PID")
@@ -2116,6 +1913,9 @@ def main() -> None:
     # Initialize logs store in session state
     if "run_logs" not in st.session_state:
         st.session_state["run_logs"] = []
+    # Track active runs in session state as a list of run info dicts
+    if "active_runs" not in st.session_state:
+        st.session_state["active_runs"] = []
 
     # Ensure home config exists
     try:
