@@ -1,25 +1,13 @@
+# Minimal top-level project requirements (high-level, unpinned).
+# Keep this list focused on core libraries used throughout the project.
+# Regenerate `requirements.txt` with `pip-compile --output-file=requirements.txt requirements.in`.
+
+streamlit
 pandas
 numpy
-openpyxl
-statsmodels
-scikit-learn
 scipy
+scikit-learn
+statsmodels
 matplotlib
-plotly
 seaborn
-tqdm
-tabulate
-pytest
-ipykernel
-jupyter
-tabulate
-lxml
-pandas_datareader
 yfinance
-yahooquery
-bs4
-nbformat
-nbconvert
-cvxpy
-PyPortfolioOpt
-yellowbrick

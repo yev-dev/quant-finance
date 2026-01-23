@@ -308,6 +308,25 @@ def render_script_runners_tab() -> None:
 
     module_name = st.selectbox("Select a module", modules)
 
+    # Quick view: show the backend command template for this module
+    col_cmd_btn, _col_cmd_space = st.columns([1, 3])
+    with col_cmd_btn:
+        if st.button("Show backend command"):
+            try:
+                conda_env_preview = (env_vars.get("CONDA_ENV") or "qf") if env_vars else "qf"
+                cmd_preview = build_command(
+                    module_name,
+                    parse_argparse_args_for_module(module_name),
+                    {},
+                    conda_env_name=conda_env_preview,
+                    backend=st.session_state.get("runner_backend", "python"),
+                )
+                cmd_str_preview = " ".join(shlex.quote(c) for c in cmd_preview)
+                with st.expander("Backend command (preview)", expanded=True):
+                    st.code(cmd_str_preview)
+            except Exception as e:
+                st.error(f"Failed to build backend command: {e}")
+
     with st.expander("Detected Parameters", expanded=True):
         specs = parse_argparse_args_for_module(module_name)
         if specs:

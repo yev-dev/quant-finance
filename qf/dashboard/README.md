@@ -181,6 +181,122 @@ conda run -n qf streamlit run dashboard.py
 # streamlit run dashboard.py
 ```
 
+## Run helper scripts
+
+For convenience this repo includes small helper scripts to run the dashboard using a specified Conda environment and a few common operations.
+
+POSIX (bash/zsh):
+
+```bash
+# Start the dashboard in conda env `qf` (default port 8501)
+./run_dashboard.sh --env qf --operation run-dashboard
+
+# Run a quick syntax check (py_compile) inside the env
+./run_dashboard.sh --env qf --operation run-dashboard-schk
+
+# Development run with watchdog file-watcher and printed command
+./run_dashboard.sh --env qf --operation run-dashboard-develop --port 8600
+
+# Show helper text
+./run_dashboard.sh --helper
+```
+
+Windows (CMD):
+
+```cmd
+REM Start the dashboard (uses conda run)
+run_dashboard.bat --env qf --operation run-dashboard
+
+REM Syntax check
+run_dashboard.bat --env qf --operation run-dashboard-schk
+
+REM Development run with watchdog
+run_dashboard.bat --env qf --operation run-dashboard-develop --port 8600
+
+REM Show help
+run_dashboard.bat --helper
+```
+
+Windows (PowerShell):
+
+```powershell
+# If you prefer PowerShell use the run_dashboard.ps1 helper
+.
+.\run_dashboard.ps1 -Env qf -Operation run-dashboard
+# or
+.\run_dashboard.ps1 -Env qf -Operation run-dashboard-develop -Port 8600
+```
+
+## Quick developer checks
+
+Before opening the UI you can run a couple of quick checks locally to catch syntax issues and ensure Streamlit will use the file-watcher you expect.
+
+- Syntax (quick compile check):
+
+  ```bash
+  # From the repository root or the dashboard folder
+  python -m py_compile qf/dashboard/dashboard.py
+  # If this completes with no output the file compiles to bytecode (no syntax errors).
+  ```
+
+- Run Streamlit with the watchdog file watcher (auto-reload on save):
+
+  ```bash
+  # Recommended: run Streamlit from the qf conda env so the app uses the correct interpreter
+  conda run -n qf streamlit run dashboard.py --server.fileWatcherType=watchdog --server.runOnSave=true
+
+  # Or activate the env then run:
+  # conda activate qf
+  # streamlit run dashboard.py --server.fileWatcherType=watchdog --server.runOnSave=true
+  ```
+
+If you see Streamlit failing to reload on save, confirm `watchdog` is installed in `qf`:
+
+```bash
+conda run -n qf pip show watchdog || conda run -n qf pip install watchdog
+```
+
+## Packaging for Windows
+
+If you want a native Windows executable (single-file) for the dashboard launcher, use PyInstaller from a Windows environment that has the required packages installed (recommended inside the `qf` environment). The repository includes helper scripts in this folder:
+
+- `build_desktop_windows.bat` — simple .bat wrapper to run PyInstaller with sensible defaults.
+- `build_desktop_windows.ps1` — PowerShell helper with optional parameters.
+
+High-level steps (on Windows):
+
+1. Open a Developer PowerShell for Visual Studio or ensure the required MSVC build tools are available (PyInstaller may require the Microsoft Visual C++ Redistributable and build toolchain when bundling C extensions).
+2. Activate the Python environment that contains `streamlit` and `pywebview`:
+
+```powershell
+conda activate qf
+pip install pywebview pyinstaller requests
+```
+
+3. From the `qf/dashboard` folder run the bundled helper (PowerShell):
+
+```powershell
+./build_desktop_windows.ps1 -OutputDir .\dist
+```
+
+Or using the batch file:
+
+```cmd
+build_desktop_windows.bat
+```
+
+Notes and common issues on Windows
+- Visual C++: If the build fails with missing MSVC tools, install "Build Tools for Visual Studio" or the full Visual Studio with C++ workload.
+- VC Redistributable: The target machines may need the Visual C++ Redistributable installed to run the final .exe.
+- Anti-virus: Some Windows anti-virus products flag single-file executables produced by PyInstaller; codesign the binary if distributing widely.
+- Testing: Run the produced `dashboard-launcher.exe` and verify it starts the server and opens a window. If the window is blank or fails, check the `stdout`/`stderr` logs that PyInstaller can produce when `--console` is enabled.
+- Hidden imports/data: If modules (e.g., `webview.platforms.win32`) fail to import at runtime, add `--hidden-import` options to the PyInstaller call or adjust the included `datas` in the `.spec`.
+
+If you want, I can further tune the `.spec` file for Windows (add common hidden-imports and data files) and test a small build locally in this environment if you grant permission to run PyInstaller.
+
+
+
+
 ## Using the Script Runners tab
 
 - Place your modules in `runners/` (e.g., `runners/first_model.py`).
