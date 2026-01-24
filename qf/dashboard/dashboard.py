@@ -1632,6 +1632,44 @@ def render_reconciliation_tab() -> None:
     fields_raw = st.text_input("Optional fields to compare (comma-separated)", value="")
     fields = [f.strip() for f in fields_raw.split(",") if f.strip()] or None
 
+    # Helper: try to sample CSV columns from a path or uploaded file
+    def _sample_columns(path: str | None = None, upload=None) -> List[str]:
+        import io
+        try:
+            if upload is not None:
+                try:
+                    data = upload.getvalue()
+                except Exception:
+                    data = upload.read()
+                stream = io.StringIO(data.decode("utf-8-sig"))
+            elif path and os.path.exists(path):
+                stream = open(path, "r", encoding="utf-8-sig", newline="")
+            else:
+                return []
+            # Read a sample and detect delimiter
+            import csv
+            sample = stream.read(8192)
+            stream.seek(0)
+            try:
+                dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
+                sep = dialect.delimiter
+            except Exception:
+                sep = ","
+            reader = csv.reader(stream, delimiter=sep)
+            hdr = next(reader, [])
+            hdr = [h.strip().strip('"').strip("'") for h in hdr]
+            # If header is a single cell that contains commas, split it
+            if len(hdr) == 1 and "," in hdr[0]:
+                hdr = [h.strip().strip('"').strip("'") for h in hdr[0].split(",")]
+            try:
+                if hasattr(stream, "close"):
+                    stream.close()
+            except Exception:
+                pass
+            return hdr
+        except Exception:
+            return []
+
     if mode == "Directories":
         # Optional single preset env (applies to both BEFORE and AFTER) using RESULT_PATH
         envs_with_resultpath = [e for e in envs if get_env_for(e).get("RESULT_PATH")]
@@ -1707,6 +1745,25 @@ def render_reconciliation_tab() -> None:
                     st.session_state["recon_after_dir"] = st.session_state.get("browse_after_dir_root", DASHBOARD_DIR)
                     after_dir = st.session_state["recon_after_dir"]
         run_btn = st.button("Run Reconciliation (Directories)")
+        # Offer a sampled-fields multiselect for directories by peeking at the first CSV file in the before/after folders
+        sampled_cols = []
+        try:
+            bd_path = (st.session_state.get("recon_before_dir") or before_dir) or ""
+            ad_path = (st.session_state.get("recon_after_dir") or after_dir) or ""
+            def _first_csv_in(d):
+                if not d or not os.path.isdir(d):
+                    return None
+                files = sorted([f for f in os.listdir(d) if f.lower().endswith('.csv')])
+                return os.path.join(d, files[0]) if files else None
+            first_b = _first_csv_in(bd_path)
+            first_a = _first_csv_in(ad_path)
+            sampled_cols = _sample_columns(path=first_b) or _sample_columns(path=first_a)
+        except Exception:
+            sampled_cols = []
+        if sampled_cols:
+            sel = st.multiselect("Pick optional fields to compare (leave empty for all)", options=sampled_cols, key="recon_fields_select_dirs")
+            if sel:
+                fields = sel
         if run_btn:
             if not key.strip():
                 st.error("Reconciliation key is required.")
@@ -1783,6 +1840,24 @@ def render_reconciliation_tab() -> None:
         st.subheader("Or drag and drop CSV files")
         before_upload = st.file_uploader("Upload BEFORE CSV", type=["csv"], key="upload_before_csv")
         after_upload = st.file_uploader("Upload AFTER CSV", type=["csv"], key="upload_after_csv")
+        # Provide an optional interactive selector for fields (unchecked by default).
+        sampled_cols = []
+        # Prefer uploaded files for column sampling
+        if before_upload is not None:
+            sampled_cols = _sample_columns(upload=before_upload)
+        elif after_upload is not None:
+            sampled_cols = _sample_columns(upload=after_upload)
+        else:
+            # Try to sample from provided paths if present
+            bf_path = st.session_state.get("recon_before_file") or before_file
+            af_path = st.session_state.get("recon_after_file") or after_file
+            sampled_cols = _sample_columns(path=bf_path) or _sample_columns(path=af_path)
+
+        if sampled_cols:
+            sel = st.multiselect("Pick optional fields to compare (leave empty for all)", options=sampled_cols, key="recon_fields_select")
+            # If user selected via multiselect, override fields
+            if sel:
+                fields = sel
         run_btn = st.button("Run Reconciliation (Files)")
         if run_btn:
             if not key.strip():
@@ -2099,7 +2174,7 @@ def main() -> None:
         existing_envs = list_env_names() or ["DEV", "UAT", "PROD"]
         st.session_state["selected_env"] = existing_envs[0]
 
-    tab_runner, tab_monitor, tab_config, tab_recon, tab_tools, tab_docs = st.tabs(["Script Runners", "Monitoring", "Config", "Reconciliation", "Tools", "Docs"])
+    tab_runner, tab_monitor, tab_config, tab_tools, tab_docs = st.tabs(["Script Runners", "Monitoring", "Config", "Tools", "Docs"])
 
     # --- Script Runners Tab ---
     with tab_runner:
@@ -2113,9 +2188,7 @@ def main() -> None:
     with tab_config:
         render_config_tab()
 
-    # --- Reconciliation Tab ---
-    with tab_recon:
-        render_reconciliation_tab()
+    # Reconciliation tab hidden for now
 
     # --- Tools Tab ---
     with tab_tools:

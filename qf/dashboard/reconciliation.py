@@ -17,6 +17,7 @@ Notes:
 
 import os
 import csv
+import re
 from typing import Dict, List, Optional, Tuple
 from difflib import unified_diff
 
@@ -28,14 +29,74 @@ def _read_csv_to_dict(path: str, key: str) -> Tuple[Dict[str, Dict[str, str]], L
     """
     records: Dict[str, Dict[str, str]] = {}
     columns: List[str] = []
-    with open(path, "r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        columns = list(reader.fieldnames or [])
-        if key not in columns:
-            raise ValueError(f"Key column '{key}' not in CSV: {path}")
-        for row in reader:
-            k = str(row.get(key, ""))
+
+    # Robust CSV reading: detect delimiter, handle BOM, normalize header names
+    with open(path, "r", encoding="utf-8-sig", newline="") as f:
+        sample = f.read(8192)
+        f.seek(0)
+        try:
+            dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
+            sep = dialect.delimiter
+        except Exception:
+            sep = ","
+
+        reader = csv.reader(f, delimiter=sep)
+        try:
+            header = next(reader)
+        except StopIteration:
+            raise ValueError(f"CSV is empty: {path}")
+
+        # If header parsed as a single cell containing commas, try splitting by comma
+        header = [h.strip().strip('"').strip("'") for h in header]
+        if len(header) == 1 and "," in header[0]:
+            header = [h.strip().strip('"').strip("'") for h in header[0].split(",")]
+            # reset reader to use comma separator
+            f.seek(0)
+            reader = csv.reader(f, delimiter=",")
+            try:
+                next(reader)
+            except StopIteration:
+                pass
+
+        columns = header
+
+        def _norm(s: Optional[str]) -> str:
+            if s is None:
+                return ""
+            s2 = s.strip().lower()
+            # remove non-alphanumeric characters to make comparisons tolerant
+            s2 = re.sub(r"[^0-9a-z]+", "", s2)
+            return s2
+
+        norm_map = { _norm(c): c for c in columns }
+        key_col = None
+        if key in columns:
+            key_col = key
+        else:
+            kn = _norm(key)
+            if kn in norm_map:
+                key_col = norm_map[kn]
+            else:
+                # try case-insensitive exact match as a last resort
+                for c in columns:
+                    if c.strip().lower() == key.strip().lower():
+                        key_col = c
+                        break
+        if not key_col:
+            raise ValueError(f"Key column '{key}' not in CSV: {path}. Detected columns: {columns}")
+
+        # Rewind and use DictReader with detected separator. Skip initial header row if DictReader treats it as data.
+        f.seek(0)
+        dreader = csv.DictReader(f, delimiter=sep)
+        # Normalize fieldnames in DictReader if needed
+        if dreader.fieldnames:
+            # strip quotes/spaces
+            dreader.fieldnames = [fn.strip().strip('"').strip("'") for fn in dreader.fieldnames]
+
+        for row in dreader:
+            k = str(row.get(key_col, "") or "")
             records[k] = {c: (row.get(c, "") or "") for c in columns}
+
     return records, columns
 
 

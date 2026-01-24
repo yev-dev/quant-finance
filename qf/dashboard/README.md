@@ -1,6 +1,6 @@
 # Dashboard
 
-A Streamlit-based dashboard for discovering and running Python runner modules as subprocesses. It scans the `runners/` package for modules, infers CLI parameters (via argparse), and executes them inside the `qf` conda environment. The app also provides logs of recent runs and a simple editor for the Streamlit config.
+A Streamlit-based dashboard for discovering and running Python runner modules as subprocesses. It scans the `runners/` package for modules, infers CLI parameters (via argparse), and executes them inside the <env> conda environment. The app also provides logs of recent runs and a simple editor for the Streamlit config.
 
 Note: The Streamlit Deploy/Share button is intentionally hidden to prevent accidental cloud deployment from this operational dashboard.
 
@@ -10,20 +10,18 @@ Note: The Streamlit Deploy/Share button is intentionally hidden to prevent accid
   - [Script Runners](#script-runners)
   - [Logs](#logs)
   - [Config](#config)
-  - [Reconciliation](#reconciliation)
   - [Tools](#tools)
   - [Docs](#docs)
 - [Centralized logs](#centralized-logs)
 - [Quick start](#quick-start)
 - [Configuration reference (excerpt)](#configuration-reference-excerpt)
 - [Troubleshooting](#troubleshooting)
-- [Reconciliation tab](#reconciliation-tab)
 - [Folder layout](#folder-layout)
 - [Requirements](#requirements)
 - [Setup](#setup)
 - [How to run](#how-to-run)
 - [Using the Script Runners tab](#using-the-script-runners-tab)
-- [Logs tab](#logs-tab)
+  - [Maintenance tab](#maintenance-tab)
 - [Config tab](#config-tab)
 - [Auto-reload and file watching](#auto-reload-and-file-watching)
 - [Example runner modules](#example-runner-modules)
@@ -43,10 +41,26 @@ This dashboard is organized into tabs. Here’s what each tab contains and how t
 - Scripts package selection: if `.streamlit/config.toml` has a list for `runners_package`, pick one from the dropdown or enter a custom value; switching refreshes the discovered module list.
 - Historical Log Runs: shows a timeline of executed commands with combined stdout+stderr.
 
-### Logs
-- Shows the tail of the centralized dashboard log at `~/.dashboard/logs/dashboard.log`.
-- Use Refresh to reload the tail.
-- All detached runs write their stdout/stderr to `~/.dashboard/logs/runs/*.log` and can auto-stream into the main log when auto-attach is enabled.
+### Monitoring
+
+- Running Processes: interactive table of processes started by the dashboard (and tracked in session). Actions:
+  - Refresh Running Processes: forces a refresh/rerun of the app to reflect the current OS process state.
+  - Select rows and click "Terminate Selected" to send termination signals to chosen PIDs.
+  - "Terminate All" stops all tracked processes started by the dashboard.
+  - If a detached run is tracked in session state but not present in ACTIVE_PROCS, the dashboard will attempt to clean up stale entries.
+
+- Dashboard Log (tail): shows a live tail of the centralized dashboard log at `~/.dashboard/logs/dashboard.log`.
+  - Refresh (manual) button re-reads the tail.
+  - Download Log: downloads the dashboard log; large downloads are written to disk as a zip and served to the browser to avoid excessive memory usage.
+
+- Per-run log tails:
+  - Detached runs write stdout/err into `~/.dashboard/logs/runs/` as separate files. The UI shows a merged tail (stdout+stderr) for each run — lines are merged in timestamp/order when possible and shown without injected "STDERR:" headers.
+  - Attach tail to dashboard.log: copy current tail contents into the central dashboard log (useful for capturing a snapshot).
+  - Auto-attach: when enabled (configurable in Streamlit config), background tailers automatically append new output from running processes into the dashboard.log at a configurable interval.
+
+- Historical Log Runs: timeline of completed runs with captured stdout/stderr. The UI presents combined output for convenience (stderr appended raw), and you can clear the history via "Clear Logs".
+
+- Logs Maintenance: utilities to clear or rotate logs. The app avoids keeping extremely large logs in memory — downloads use disk-backed zip files.
 
 ### Config
 - Environment Config (`~/.dashboard/config.ini`): edit existing keys for selected env (DEV/UAT/PROD). Save persists to the home config.
@@ -58,14 +72,6 @@ This dashboard is organized into tabs. Here’s what each tab contains and how t
     - `default_notebook_dir`: default folder for starting Jupyter.
     - `auto_attach` (bool): whether new processes auto-stream their logs into dashboard.log.
     - `auto_attach_interval` (float): seconds between tail checks.
-
-### Reconciliation
-- Compare CSVs by a reconciliation key.
-  - Mode “Directories”: reconcile CSVs found in both BEFORE and AFTER directories by filename; aggregate differences.
-  - Mode “Files”: directly compare a BEFORE file to an AFTER file.
-- Optional “Preset Env” to auto-fill directories via `RESULT_PATH` from env config.
-- Built-in directory/file browsers and CSV uploaders.
-- Export the text report via the Download button.
 
 ### Tools
 - Check Environment: runs `check_environment.py` (from a parent `tools/` folder) inside the selected conda env and shows output.
@@ -84,11 +90,11 @@ This dashboard is organized into tabs. Here’s what each tab contains and how t
 - Auto-attach tailers: when enabled, background tailers stream new output into the main dashboard log; defaults are controlled via `.streamlit/config.toml`.
 
 ## Quick start
-1. Ensure the `qf` conda environment exists with `streamlit` and `watchdog` installed.
+1. Ensure the <env> conda environment exists with `streamlit` and `watchdog` installed.
 2. Launch the app (via VS Code task or):
 
 ```bash
-conda run -n qf streamlit run dashboard.py --server.fileWatcherType=watchdog --server.runOnSave=true
+conda run -n <env> streamlit run dashboard.py --server.fileWatcherType=watchdog --server.runOnSave=true
 ```
 
 3. Open Script Runners, pick a module, fill parameters, and run.
@@ -119,16 +125,6 @@ auto_attach_interval = 2.0
 - Permission errors on logs: ensure your user can create `~/.dashboard/logs` and `runs` subfolder.
 - Streamlit not reloading: verify `fileWatcherType = "watchdog"` and `runOnSave = true` are set; ensure the app is launched via the intended environment.
 
-## Reconciliation tab
-
-- Compare CSVs by a reconciliation key:
-  - Mode "Directories": provide paths to a BEFORE and AFTER directory; it will reconcile CSV files present in both by filename and aggregate differences.
-  - Mode "Files": provide a BEFORE and AFTER CSV file path to compare.
-- Parameters:
-  - Reconciliation key (CSV column name) — required.
-  - Optional fields (comma-separated) — restricts comparison to the specified columns; leave empty to compare all shared columns.
-- Output: A text report is shown and can be downloaded as a `.txt` file.
-
 ## Folder layout
 
 - `dashboard.py` — Streamlit UI with tabs (Script Runners, Logs, Config)
@@ -139,30 +135,30 @@ auto_attach_interval = 2.0
 ## Requirements
 
 - Conda (Miniconda or Anaconda) installed and available on PATH
-- Conda environment named `qf` with Python and dependencies
-- Python packages in `qf` env:
+- Conda environment named <env> with Python and dependencies
+- Python packages in <env> env:
   - `streamlit`
   - `watchdog` (for robust file watching)
 
 ## Setup
 
-1. Ensure the `qf` environment exists:
+1. Ensure the <env> environment exists:
 
 ```bash
 conda env list
-conda create -n qf python=3.11  # if needed
+conda create -n <env> python=3.11  # if needed
 ```
 
-2. Install required packages into `qf`:
+2. Install required packages into <env>:
 
 ```bash
-conda run -n qf pip install streamlit watchdog
+conda run -n <env> pip install streamlit watchdog
 ```
 
-3. (Optional) Verify Streamlit inside `qf`:
+3. (Optional) Verify Streamlit inside <env>:
 
 ```bash
-conda run -n qf python -c "import streamlit, watchdog; print('OK')"
+conda run -n <env> python -c "import streamlit, watchdog; print('OK')"
 ```
 
 ## How to run
@@ -173,10 +169,10 @@ From the dashboard directory:
 cd /Users/yevgeniy/Development/Projects/FinancialEngineering/quant-finance/qf/dashboard
 
 # Option A: Run Streamlit via conda run (recommended for reliability)
-conda run -n qf streamlit run dashboard.py
+conda run -n <env> streamlit run dashboard.py
 
 # Option B: Activate env and run (works if your shell supports conda activate)
-# conda activate qf
+# conda activate <env>
 # streamlit run dashboard.py
 ```
 
@@ -191,10 +187,10 @@ conda run -n qf streamlit run dashboard.py
 - The command that will be executed looks like:
 
 ```bash
-conda run -n qf python -m runners.<module_name> [args]
+conda run -n <env> python -m runners.<module_name> [args]
 ```
 
-## Logs tab
+## Maintenance tab
 
 - Shows a history of recent runs (command, exit code, stdout, stderr).
 - Click "Clear Logs" to wipe the history.
@@ -219,11 +215,11 @@ runOnSave = true
 
 ## Troubleshooting
 
-- "Import streamlit could not be resolved": install `streamlit` in the `qf` environment and run the app via `conda run -n qf`.
+- "Import streamlit could not be resolved": install `streamlit` in the <env> environment and run the app via `conda run -n <env>`.
 - "conda: command not found": install Miniconda/Anaconda and ensure `conda` is on PATH.
-- Env `qf` doesn’t exist: create it via `conda create -n qf python=3.11`.
+- Env <env> doesn’t exist: create it via `conda create -n <env> python=3.11`.
 - Modules not detected: ensure `.py` files are inside `runners/` and that `runners/__init__.py` exists.
-- Subprocess fails: check the command shown in the UI; verify dates/args and that required packages are installed in the `qf` env.
+- Subprocess fails: check the command shown in the UI; verify dates/args and that required packages are installed in the <env> env.
 
 ## Example runner modules
 
