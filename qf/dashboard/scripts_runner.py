@@ -839,7 +839,8 @@ def attach_log_tail_to_dashboard(pid: int, max_lines: int = 200, label: Optional
             with open(err_path, "r", encoding="utf-8", errors="ignore") as f:
                 lines = f.readlines()
             if lines:
-                combined_tail.append("\n\nSTDERR (tail):\n" + "".join(lines[-max_lines:]))
+                # Append raw stderr lines without inserting any header
+                combined_tail.append("".join(lines[-max_lines:]))
         text = ("".join(combined_tail)).strip()
         header = f"[ATTACH] PID={pid}{(' '+str(label)) if label else ''}"
         if text:
@@ -891,7 +892,8 @@ def _tail_attach_loop(pid: int, label: Optional[str], interval: float, stop_even
                     data = f.read()
                 if data:
                     err_pos += len(data)
-                    chunks.append("\n\nSTDERR:\n" + data)
+                    # Append stderr output raw; do not inject any header
+                    chunks.append(data)
             if chunks:
                 header = f"[TAIL] PID={pid}{(' '+str(label)) if label else ''}"
                 logger.info("%s\n%s", header, "".join(chunks).rstrip())
