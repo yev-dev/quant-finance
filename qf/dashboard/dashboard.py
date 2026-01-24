@@ -52,11 +52,102 @@ from scripts_runner import (
     set_runners_source_from_env,
     set_runners_package,
     ACTIVE_PROCS,
+    ACTIVE_LOG_PATHS,
     attach_log_tail_to_dashboard,
     enable_auto_attach,
     disable_auto_attach,
     auto_attach_enabled,
 )
+
+import re
+from datetime import datetime as _dt
+
+
+def _extract_timestamp(line: str):
+    """Try to extract a timestamp from the start of the line.
+
+    Returns a datetime or None.
+    Supported patterns: ISO 8601 (YYYY-MM-DD[ T]HH:MM:SS), compact YYYYMMDD-HHMMSS.
+    """
+    if not line:
+        return None
+    s = line.strip()
+    # ISO 8601 / common 'YYYY-MM-DD HH:MM:SS' or 'YYYY-MM-DDTHH:MM:SS'
+    m = re.match(r"^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})", s)
+    if m:
+        t = m.group(1)
+        try:
+            return _dt.fromisoformat(t.replace(" ", "T"))
+        except Exception:
+            try:
+                return _dt.strptime(t, "%Y-%m-%d %H:%M:%S")
+            except Exception:
+                pass
+    # Compact form: YYYYMMDD-HHMMSS
+    m2 = re.match(r"^(\d{8}-\d{6})", s)
+    if m2:
+        t = m2.group(1)
+        try:
+            return _dt.strptime(t, "%Y%m%d-%H%M%S")
+        except Exception:
+            pass
+    return None
+
+
+def merge_log_tails(out_path: str | None, err_path: str | None, max_lines: int = 200) -> str:
+    """Return a merged tail of stdout and stderr files.
+
+    Tries to interleave lines by embedded timestamps when present. Falls back to alternating
+    lines (zip_longest) when timestamps are not parseable.
+    """
+    from itertools import zip_longest
+
+    out_lines = []
+    err_lines = []
+    try:
+        if out_path and os.path.exists(out_path):
+            with open(out_path, "r", encoding="utf-8", errors="ignore") as f:
+                out_lines = f.readlines()[-max_lines:]
+    except Exception:
+        out_lines = []
+    try:
+        if err_path and os.path.exists(err_path):
+            with open(err_path, "r", encoding="utf-8", errors="ignore") as f:
+                err_lines = f.readlines()[-max_lines:]
+    except Exception:
+        err_lines = []
+
+    # If both empty, return empty
+    if not out_lines and not err_lines:
+        return ""
+
+    # Attempt to extract timestamps per line
+    entries = []
+    for idx, l in enumerate(out_lines):
+        ts = _extract_timestamp(l)
+        entries.append((ts, "OUT", idx, l))
+    for idx, l in enumerate(err_lines):
+        ts = _extract_timestamp(l)
+        entries.append((ts, "ERR", idx, l))
+
+    # If at least some lines have timestamps, sort by timestamp (None last) then by source/index
+    # Return the raw lines in timestamp order without injecting any headers or prefixes.
+    if any(e[0] is not None for e in entries):
+        sentinel = _dt.max
+        sorted_entries = sorted(entries, key=lambda e: (e[0] or sentinel, e[1], e[2]))
+        out_lines_ordered: List[str] = [line for (_, _, _, line) in sorted_entries]
+        return "".join(out_lines_ordered)
+
+    # Fallback: interleave by alternating lines to approximate order. Do not add any
+    # headers or prefixes; preserve original lines as-is.
+    merged = []
+    for a, b in zip_longest(out_lines, err_lines, fillvalue=None):
+        if a is not None:
+            merged.append(a)
+        if b is not None:
+            merged.append(b)
+    return "".join(merged)
+
 
 # Point to the runners directory (one level down from this file)
 SCRIPT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "runners")
@@ -719,29 +810,12 @@ def render_script_runners_tab() -> None:
                                 except Exception:
                                     pass
                                 st.success(f"Started module '{module_name}' from config (PID {info['pid']}). Running in detached mode.")
-                                # Show initial tail without rerun (combine stdout + stderr in Log generation)
+                                # Show initial tail without rerun (merge stdout + stderr)
                                 out_path = info.get("stdout_path")
                                 err_path = info.get("stderr_path")
                                 st.subheader("Log generation (tail)")
-                                combined_tail = ""
-                                try:
-                                    if out_path and os.path.exists(out_path):
-                                        with open(out_path, "r", encoding="utf-8", errors="ignore") as f:
-                                            out_lines = f.readlines()[-200:]
-                                        combined_tail += "".join(out_lines)
-                                except Exception:
-                                    pass
-                                try:
-                                    if err_path and os.path.exists(err_path):
-                                        with open(err_path, "r", encoding="utf-8", errors="ignore") as f:
-                                            err_lines = f.readlines()[-200:]
-                                        if err_lines:
-                                            if combined_tail:
-                                                combined_tail += "\n\nSTDERR (tail):\n"
-                                            combined_tail += "".join(err_lines)
-                                except Exception:
-                                    pass
-                                st.text_area("Stdout", value=combined_tail or "(no output yet)", height=300, key=f"initial_cfg_tail_{info['pid']}", label_visibility="collapsed")
+                                merged = merge_log_tails(out_path, err_path, max_lines=200)
+                                st.text_area("Stdout", value=merged or "(no output yet)", height=300, key=f"initial_cfg_tail_{info['pid']}", label_visibility="collapsed")
                                 # Start auto attach by default
                                 try:
                                     if AUTO_ATTACH_DEFAULT:
@@ -757,7 +831,12 @@ def render_script_runners_tab() -> None:
                                 logging.getLogger("dashboard").exception("Run with config failed for module %s", module_name)
                                 st.error(f"Run failed: {e}")
                             else:
-                                st.success(f"Run (config) finished (rc={result.returncode}).")
+                                # Show success/failure rather than raw rc value
+                                rc_cfg = result.returncode
+                                if rc_cfg == 0:
+                                    st.success("Run (config) finished: Success")
+                                else:
+                                    st.error(f"Run (config) finished: Failure (rc={rc_cfg})")
                                 try:
                                     elapsed_cfg = (datetime.now() - _t0_cfg).total_seconds()
                                     logging.getLogger("dashboard").info(
@@ -770,8 +849,7 @@ def render_script_runners_tab() -> None:
                                     pass
                                 combined = (result.stdout or "")
                                 if result.stderr:
-                                    if combined:
-                                        combined += "\n\nSTDERR:\n"
+                                    # Append stderr raw without inserting a header
                                     combined += result.stderr
                                 st.subheader("Log generation")
                                 st.text_area("Stdout", value=combined or "(no output)", height=400, key=_next_ui_key(f"final_sync_cfg_log_{module_name}"), label_visibility="collapsed")
@@ -901,25 +979,8 @@ def render_script_runners_tab() -> None:
                     st.caption("Log generation (tail)")
                     out_path = active.get("stdout_path")
                     err_path = active.get("stderr_path")
-                    combined_tail = ""
-                    try:
-                        if out_path and os.path.exists(out_path):
-                            with open(out_path, "r", encoding="utf-8", errors="ignore") as f:
-                                out_lines = f.readlines()[-200:]
-                            combined_tail += "".join(out_lines)
-                    except Exception:
-                        pass
-                    try:
-                        if err_path and os.path.exists(err_path):
-                            with open(err_path, "r", encoding="utf-8", errors="ignore") as f:
-                                err_lines = f.readlines()[-200:]
-                            if err_lines:
-                                if combined_tail:
-                                    combined_tail += "\n\nSTDERR (tail):\n"
-                                combined_tail += "".join(err_lines)
-                    except Exception:
-                        pass
-                    st.text_area("Stdout", value=combined_tail or "(no output yet)", height=300, key=f"live_log_{pid}", label_visibility="collapsed")
+                    merged = merge_log_tails(out_path, err_path, max_lines=200)
+                    st.text_area("Stdout", value=merged or "(no output yet)", height=300, key=f"live_log_{pid}", label_visibility="collapsed")
             else:
                 # Finished; record log entry and remove from active_runs
                 rc = status.get("returncode")
@@ -937,7 +998,11 @@ def render_script_runners_tab() -> None:
                             err_text = f.read()
                 except Exception:
                     pass
-                st.success(f"Run finished (rc={rc}).")
+                # Show success/failure rather than raw rc value
+                if rc == 0:
+                    st.success("Run finished: Success")
+                else:
+                    st.error(f"Run finished: Failure (rc={rc})")
                 try:
                     started_at = active.get("started_at")
                     elapsed_s = None
@@ -967,8 +1032,7 @@ def render_script_runners_tab() -> None:
                 if not active.get("detached"):
                     combined = out_text or ""
                     if err_text:
-                        if combined:
-                            combined += "\n\nSTDERR:\n"
+                        # Append stderr raw without inserting a header
                         combined += err_text
                     st.subheader("Log generation")
                     st.text_area("Stdout", value=combined or "(no output)", height=400, key=f"final_log_{pid}", label_visibility="collapsed")
@@ -1062,20 +1126,9 @@ def render_script_runners_tab() -> None:
             err_path = info.get("stderr_path")
             # Show combined stdout + stderr tail
             try:
-                combined_tail = ""
-                if out_path and os.path.exists(out_path):
-                    with open(out_path, "r", encoding="utf-8", errors="ignore") as f:
-                        out_lines = f.readlines()[-200:]
-                    combined_tail += "".join(out_lines)
-                if err_path and os.path.exists(err_path):
-                    with open(err_path, "r", encoding="utf-8", errors="ignore") as f:
-                        err_lines = f.readlines()[-200:]
-                    if err_lines:
-                        if combined_tail:
-                            combined_tail += "\n\nSTDERR (tail):\n"
-                        combined_tail += "".join(err_lines)
                 st.subheader("Log generation (tail)")
-                st.text_area("Stdout", value=combined_tail or "(no output yet)", height=300, key=f"initial_tail_{info['pid']}", label_visibility="collapsed")
+                merged = merge_log_tails(out_path, err_path, max_lines=200)
+                st.text_area("Stdout", value=merged or "(no output yet)", height=300, key=f"initial_cfg_tail_{info['pid']}", label_visibility="collapsed")
             except Exception:
                 pass
             # Start auto attach by default
@@ -1092,7 +1145,12 @@ def render_script_runners_tab() -> None:
                 logging.getLogger("dashboard").exception("Run failed for module %s", module_name)
                 st.error(f"Run failed: {e}")
                 return
-            st.success(f"Run finished (rc={result.returncode}).")
+            # Show success/failure rather than raw rc value
+            rc_run = result.returncode
+            if rc_run == 0:
+                st.success("Run finished: Success")
+            else:
+                st.error(f"Run finished: Failure (rc={rc_run})")
             try:
                 elapsed = (datetime.now() - _t0).total_seconds()
                 logging.getLogger("dashboard").info(
@@ -1106,8 +1164,7 @@ def render_script_runners_tab() -> None:
             if st.session_state.get("combine_stderr", True):
                 combined = (result.stdout or "")
                 if result.stderr:
-                    if combined:
-                        combined += "\n\nSTDERR:\n"
+                    # Append stderr raw without inserting a header
                     combined += result.stderr
                 st.subheader("Log generation")
                 st.text_area("Stdout", value=combined or "(no output)", height=400, key=_next_ui_key(f"final_sync_log_{module_name}"), label_visibility="collapsed")
@@ -1140,8 +1197,7 @@ def render_script_runners_tab() -> None:
                 combined = entry.get("stdout", "")
                 err = entry.get("stderr", "")
                 if err:
-                    if combined:
-                        combined += "\n\nSTDERR:\n"
+                    # Append stderr raw without inserting a header
                     combined += err
                 st.subheader("Log generation")
                 st.text_area("Stdout", value=combined or "(no output)", height=300, key=_next_ui_key("hist_log"), label_visibility="collapsed")
@@ -1156,6 +1212,15 @@ def render_logs_tab() -> None:
     # Running Processes (moved here from Script Runners) — shows active runs started by the dashboard
     st.subheader("Running Processes")
     st.caption("Processes started by the dashboard and still running. Select multiple to terminate.")
+    # Manual refresh for the running processes listing
+    if st.button("Refresh Running Processes", key="refresh_running_procs_btn"):
+        try:
+            st.rerun()
+        except Exception:
+            try:
+                st.experimental_rerun()
+            except Exception:
+                pass
     try:
         rows = []
         for pid, p in list(ACTIVE_PROCS.items()):
@@ -1279,6 +1344,8 @@ def render_logs_tab() -> None:
                                 pass
             with c2:
                 st.caption("Tip: Use the checkboxes to select one or more processes, then click 'Terminate Selected'.")
+
+            # Per-process log viewers removed (replaced by separate viewers or tooling)
         # --- Termination controls (moved here from Tools) ---
         st.markdown("---")
         st.subheader("Terminate all active runs")
@@ -1794,7 +1861,8 @@ def render_tools_tab() -> None:
                 err = proc.stderr or ""
                 combined = out
                 if err:
-                    combined += "\n\nSTDERR:\n" + err
+                    # Append stderr raw without inserting a header
+                    combined += err
                 with st.expander("Check Environment Output", expanded=True):
                     st.text_area("Output", value=combined or "(no output)", height=400, key="check_env_out", label_visibility="collapsed")
 
