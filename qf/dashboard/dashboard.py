@@ -1149,7 +1149,7 @@ def render_script_runners_tab() -> None:
     # (Removed here — running processes are now shown under Script Runners tab)
 
 def render_logs_tab() -> None:
-    st.header("Logs")
+    st.header("Monitoring")
     # Only show the tail of the dashboard log file in this tab
     st.subheader("Dashboard Log (tail)")
     # Manual refresh button to force reread of the log tail
@@ -1543,7 +1543,11 @@ def render_tools_tab() -> None:
     # Use an explicit widget key so we can programmatically update it when browsing
     if "nb_path_input" not in st.session_state:
         st.session_state["nb_path_input"] = st.session_state.get("nb_path", default_nb_path)
-    nb_path = st.text_input("Start directory", value=st.session_state.get("nb_path_input", default_nb_path), key="nb_path_input")
+    # Do NOT pass `value=` when the widget key is already managed in session_state;
+    # Streamlit raises if a widget is created with a default while the same key
+    # already exists in session_state. Let the text_input read/write the
+    # session_state entry by supplying only `key=`.
+    nb_path = st.text_input("Start directory", key="nb_path_input")
     # Keep canonical nb_path in session synced with widget value
     st.session_state["nb_path"] = st.session_state.get("nb_path_input", default_nb_path)
 
@@ -1589,7 +1593,7 @@ def render_tools_tab() -> None:
     st.caption("Notebook will be started detached; check logs/runs for output.")
     open_in_browser = st.checkbox(
         "Open browser on start",
-        value=False,
+        value=True,
         key="nb_open_browser",
         help="If enabled, Jupyter will attempt to open a browser window when the server starts.")
     # Detect whether JupyterLab is available in the chosen conda env
@@ -1758,6 +1762,41 @@ def render_tools_tab() -> None:
                 "name": name,
                 "parameters": params_display,
             })
+        # Merge in any detached runs recorded in session_state (e.g., across reloads)
+        try:
+            existing_pids = {int(r.get("pid")) for r in rows if r.get("pid")}
+        except Exception:
+            existing_pids = set()
+        try:
+            new_active_runs = []
+            for r in list(st.session_state.get("active_runs", [])):
+                try:
+                    rp = int(r.get("pid"))
+                except Exception:
+                    # Skip entries without a valid pid
+                    continue
+                if rp in existing_pids:
+                    continue
+                # Check OS/runtime status for this pid; if not running remove from session list
+                stat = get_status(rp)
+                if not stat.get("running"):
+                    # Clean up finished/stale session entry
+                    try:
+                        st.session_state["active_runs"] = [x for x in st.session_state.get("active_runs", []) if int(x.get("pid") or -1) != rp]
+                    except Exception:
+                        # best-effort: ignore failures
+                        pass
+                    continue
+                # Still running; include in display
+                name = r.get("module") or "Process"
+                params_display = str(r.get("cmd") or "")
+                if len(params_display) > 200:
+                    params_display = params_display[:200] + " …"
+                new_active_runs.append({"select": False, "pid": rp, "name": name, "parameters": params_display})
+            if new_active_runs:
+                rows.extend(new_active_runs)
+        except Exception:
+            pass
         if not rows:
             st.info("No running processes.")
         else:
@@ -1927,14 +1966,14 @@ def main() -> None:
         existing_envs = list_env_names() or ["DEV", "UAT", "PROD"]
         st.session_state["selected_env"] = existing_envs[0]
 
-    tab_runner, tab_logs, tab_config, tab_recon, tab_tools, tab_docs = st.tabs(["Script Runners", "Logs", "Config", "Reconciliation", "Tools", "Docs"])
+    tab_runner, tab_monitor, tab_config, tab_recon, tab_tools, tab_docs = st.tabs(["Script Runners", "Monitoring", "Config", "Reconciliation", "Tools", "Docs"])
 
     # --- Script Runners Tab ---
     with tab_runner:
         render_script_runners_tab()
 
-    # --- Logs Tab ---
-    with tab_logs:
+    # --- Monitoring Tab ---
+    with tab_monitor:
         render_logs_tab()
 
     # --- Config Tab ---
