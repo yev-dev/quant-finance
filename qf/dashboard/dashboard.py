@@ -22,6 +22,9 @@ import importlib
 import shlex
 import logging
 from logging.handlers import RotatingFileHandler
+import io
+import zipfile
+import tempfile
 from typing import Any, Dict, List
 from datetime import datetime
 from copy import deepcopy
@@ -1332,6 +1335,76 @@ def render_logs_tab() -> None:
             tail = "".join(lines[-tail_lines:])  # last N lines
             # Use a text_area with fixed height so the content is scrollable inside the widget
             st.text_area("Dashboard log tail", value=tail or "(empty)", height=300, key=_next_ui_key("dashboard_log_tail"), label_visibility="collapsed")
+            # Provide a download button for the full dashboard log placed under the log screen
+            try:
+                size_bytes = os.path.getsize(LOG_FILE)
+                size_mb = size_bytes / (1024.0 * 1024.0)
+                # If file is large, offer a zipped download to reduce transfer size
+                ZIP_THRESHOLD_MB = 5.0
+                col_dl1, col_dl2 = st.columns([1, 3])
+                with col_dl1:
+                    st.caption(f"Log size: {size_mb:.2f} MB")
+                    try:
+                        if size_mb <= ZIP_THRESHOLD_MB:
+                            # Small enough: offer raw download
+                            with open(LOG_FILE, "r", encoding="utf-8", errors="ignore") as lf:
+                                full_log = lf.read()
+                            st.download_button(
+                                "Download Log",
+                                data=full_log,
+                                file_name=os.path.basename(LOG_FILE),
+                                mime="text/plain",
+                                key=_next_ui_key("monitor_download_dashboard_log_btn"),
+                            )
+                        else:
+                            # Large file: create a disk-backed zip to reduce memory usage
+                            try:
+                                os.makedirs(UPLOADS_DIR, exist_ok=True)
+                                # Create a temp file under UPLOADS_DIR so it persists across reruns
+                                tmpf = tempfile.NamedTemporaryFile(prefix="dashboard_log_", suffix=".zip", dir=UPLOADS_DIR, delete=False)
+                                tmpf_path = tmpf.name
+                                tmpf.close()
+                                try:
+                                    with zipfile.ZipFile(tmpf_path, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+                                        # zf.write streams from disk; avoids reading full file into memory
+                                        zf.write(LOG_FILE, arcname=os.path.basename(LOG_FILE))
+                                    # Keep a short-lived registry of generated zips in session state to allow cleanup
+                                    st.session_state.setdefault("_generated_log_zips", [])
+                                    st.session_state["_generated_log_zips"].append(tmpf_path)
+                                    # Limit stored temp zips to the last 5
+                                    if len(st.session_state["_generated_log_zips"]) > 5:
+                                        old = st.session_state["_generated_log_zips"].pop(0)
+                                        try:
+                                            os.remove(old)
+                                        except Exception:
+                                            pass
+                                    # Offer the zip file for download by opening it in binary mode (Streamlit will stream it)
+                                    with open(tmpf_path, "rb") as fh:
+                                        st.download_button(
+                                            "Download Log (zipped)",
+                                            data=fh,
+                                            file_name=os.path.basename(LOG_FILE) + ".zip",
+                                            mime="application/zip",
+                                            key=_next_ui_key("monitor_download_dashboard_log_zipped_btn"),
+                                        )
+                                except Exception:
+                                    try:
+                                        os.remove(tmpf_path)
+                                    except Exception:
+                                        pass
+                                    raise
+                            except Exception:
+                                logging.getLogger("dashboard").exception("Failed to create disk-backed zip for dashboard log")
+                                st.caption("Download not available: failed to compress log file.")
+                    except Exception:
+                        logging.getLogger("dashboard").exception("Failed to prepare download for dashboard log")
+                        st.caption("Download not available: failed to read or compress log file.")
+                # Right column left empty (keeps layout balanced)
+                with col_dl2:
+                    st.write("")
+            except Exception:
+                # Non-fatal: if download setup fails, continue showing the tail and maintenance UI
+                pass
         else:
             st.caption("Log file not created yet.")
     except Exception as e:
