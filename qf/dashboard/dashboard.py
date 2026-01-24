@@ -1150,6 +1150,166 @@ def render_script_runners_tab() -> None:
 
 def render_logs_tab() -> None:
     st.header("Monitoring")
+    # Running Processes (moved here from Script Runners) — shows active runs started by the dashboard
+    st.subheader("Running Processes")
+    st.caption("Processes started by the dashboard and still running. Select multiple to terminate.")
+    try:
+        rows = []
+        for pid, p in list(ACTIVE_PROCS.items()):
+            stat = get_status(pid)
+            if not stat.get("running"):
+                continue
+            # Build command string
+            try:
+                args = getattr(p, "args", None)
+            except Exception:
+                args = None
+            if isinstance(args, (list, tuple)):
+                try:
+                    cmd_str = " ".join(shlex.quote(str(a)) for a in args)
+                except Exception:
+                    cmd_str = " ".join(str(a) for a in args)
+            else:
+                cmd_str = str(args) if args is not None else ""
+            # Heuristic name
+            name = "Process"
+            lc = (cmd_str or "").lower()
+            if "jupyter" in lc and "notebook" in lc:
+                name = "Jupyter Notebook"
+            elif " bash " in f" {lc} " and " -lc " in f" {lc} ":
+                name = "Terminal"
+            elif " -m " in f" {cmd_str} ":
+                try:
+                    parts = cmd_str.split()
+                    if "-m" in parts:
+                        mod = parts[parts.index("-m") + 1]
+                        name = mod.split(".")[-1]
+                except Exception:
+                    pass
+            elif isinstance(args, (list, tuple)) and args:
+                name = os.path.basename(str(args[0]))
+            # Truncate parameters for display
+            params_display = cmd_str
+            if len(params_display) > 200:
+                params_display = params_display[:200] + " …"
+            rows.append({
+                "select": False,
+                "pid": pid,
+                "name": name,
+                "parameters": params_display,
+            })
+        # Merge in any detached runs recorded in session_state (e.g., across reloads)
+        try:
+            existing_pids = {int(r.get("pid")) for r in rows if r.get("pid")}
+        except Exception:
+            existing_pids = set()
+        try:
+            new_active_runs = []
+            for r in list(st.session_state.get("active_runs", [])):
+                try:
+                    rp = int(r.get("pid"))
+                except Exception:
+                    # Skip entries without a valid pid
+                    continue
+                if rp in existing_pids:
+                    continue
+                # Check OS/runtime status for this pid; if not running remove from session list
+                stat = get_status(rp)
+                if not stat.get("running"):
+                    # Clean up finished/stale session entry
+                    try:
+                        st.session_state["active_runs"] = [x for x in st.session_state.get("active_runs", []) if int(x.get("pid") or -1) != rp]
+                    except Exception:
+                        # best-effort: ignore failures
+                        pass
+                    continue
+                # Still running; include in display
+                name = r.get("module") or "Process"
+                params_display = str(r.get("cmd") or "")
+                if len(params_display) > 200:
+                    params_display = params_display[:200] + " …"
+                new_active_runs.append({"select": False, "pid": rp, "name": name, "parameters": params_display})
+            if new_active_runs:
+                rows.extend(new_active_runs)
+        except Exception:
+            pass
+        if not rows:
+            st.info("No running processes.")
+        else:
+            edited = st.data_editor(
+                rows,
+                hide_index=True,
+                num_rows="fixed",
+                column_config={
+                    "select": st.column_config.CheckboxColumn("Select", help="Mark to terminate"),
+                    "pid": st.column_config.NumberColumn("PID"),
+                    "name": st.column_config.TextColumn("Name"),
+                    "parameters": st.column_config.TextColumn("Parameters"),
+                },
+                key="running_procs_editor_monitor",
+            )
+            # Collect selected PIDs
+            selected_pids = [int(r.get("pid")) for r in edited if r.get("select")]
+            c1, c2 = st.columns([1, 3])
+            with c1:
+                if st.button("Terminate Selected", key="terminate_selected_monitor_btn"):
+                    if not selected_pids:
+                        st.warning("No processes selected.")
+                    else:
+                        ok_list, fail_list = [], []
+                        for spid in selected_pids:
+                            try:
+                                ok = terminate_process(spid)
+                                (ok_list if ok else fail_list).append(spid)
+                            except Exception:
+                                fail_list.append(spid)
+                        if ok_list:
+                            st.success(f"Terminated: {', '.join(str(p) for p in ok_list)}")
+                        if fail_list:
+                            st.warning(f"Failed/Not found: {', '.join(str(p) for p in fail_list)}")
+                        try:
+                            st.rerun()
+                        except Exception:
+                            try:
+                                st.experimental_rerun()
+                            except Exception:
+                                pass
+            with c2:
+                st.caption("Tip: Use the checkboxes to select one or more processes, then click 'Terminate Selected'.")
+        # --- Termination controls (moved here from Tools) ---
+        st.markdown("---")
+        st.subheader("Terminate all active runs")
+        st.caption("Stops all processes started via the dashboard (modules, Jupyter) that are still tracked.")
+        if st.button("Terminate All", key="monitor_terminate_all_btn"):
+            pids = list(ACTIVE_PROCS.keys())
+            if not pids:
+                st.info("No active tracked processes.")
+            else:
+                terminated = []
+                failed = []
+                for pid in pids:
+                    try:
+                        ok = terminate_process(pid)
+                        if ok:
+                            terminated.append(pid)
+                        else:
+                            failed.append(pid)
+                    except Exception:
+                        failed.append(pid)
+                if terminated:
+                    st.success(f"Terminated: {', '.join(str(p) for p in terminated)}")
+                if failed:
+                    st.warning(f"Failed/Not found: {', '.join(str(p) for p in failed)}")
+                try:
+                    st.rerun()
+                except Exception:
+                    try:
+                        st.experimental_rerun()
+                    except Exception:
+                        pass
+    except Exception as e:
+        logging.getLogger("dashboard").exception("Failed to render running processes table")
+        st.error(f"Failed to show running processes: {e}")
     # Only show the tail of the dashboard log file in this tab
     st.subheader("Dashboard Log (tail)")
     # Manual refresh button to force reread of the log tail
@@ -1167,12 +1327,69 @@ def render_logs_tab() -> None:
         if os.path.exists(LOG_FILE):
             with open(LOG_FILE, "r", encoding="utf-8", errors="ignore") as f:
                 lines = f.readlines()
-            tail = "".join(lines[-200:])  # last 200 lines
-            st.code(tail or "(empty)")
+            # Show a smaller tail so the UI area stays scrollable and responsive.
+            tail_lines = 100
+            tail = "".join(lines[-tail_lines:])  # last N lines
+            # Use a text_area with fixed height so the content is scrollable inside the widget
+            st.text_area("Dashboard log tail", value=tail or "(empty)", height=300, key=_next_ui_key("dashboard_log_tail"), label_visibility="collapsed")
         else:
             st.caption("Log file not created yet.")
     except Exception as e:
         st.error(f"Failed to read log file: {e}")
+
+    # --- Logs Maintenance (moved here from Tools) ---
+    st.subheader("Logs Maintenance")
+    st.caption("Manage logs stored under your home at ~/.dashboard/logs. Clearing logs does not stop active processes.")
+    col_lm1, col_lm2 = st.columns([1, 3])
+    with col_lm1:
+        if st.button("Clear All Logs", key="tools_clear_all_logs_btn"):
+            cleared = {
+                "dashboard_log": False,
+                "rotated_logs": 0,
+                "run_logs": 0,
+            }
+            # Clear main dashboard log by truncating file; preserve file for handler
+            try:
+                os.makedirs(LOG_DIR, exist_ok=True)
+                if os.path.exists(LOG_FILE):
+                    with open(LOG_FILE, "w", encoding="utf-8") as f:
+                        f.write("")
+                    cleared["dashboard_log"] = True
+            except Exception:
+                logging.getLogger("dashboard").exception("Failed to truncate dashboard.log")
+            # Remove rotated dashboard logs (e.g., dashboard.log.1, .2)
+            try:
+                for name in os.listdir(LOG_DIR):
+                    if name.startswith("dashboard.log") and name != os.path.basename(LOG_FILE):
+                        path = os.path.join(LOG_DIR, name)
+                        try:
+                            if os.path.isfile(path):
+                                os.remove(path)
+                                cleared["rotated_logs"] += 1
+                        except Exception:
+                            pass
+            except Exception:
+                logging.getLogger("dashboard").exception("Failed to remove rotated dashboard logs")
+            # Clear run logs under ~/.dashboard/logs/runs
+            runs_dir = os.path.join(LOG_DIR, "runs")
+            try:
+                if os.path.isdir(runs_dir):
+                    for name in os.listdir(runs_dir):
+                        path = os.path.join(runs_dir, name)
+                        try:
+                            if os.path.isfile(path):
+                                os.remove(path)
+                                cleared["run_logs"] += 1
+                        except Exception:
+                            pass
+            except Exception:
+                logging.getLogger("dashboard").exception("Failed to clear run logs")
+            st.success(
+                f"Cleared logs: dashboard.log={'yes' if cleared['dashboard_log'] else 'no'}, "
+                f"rotated={cleared['rotated_logs']}, runs={cleared['run_logs']}"
+            )
+    with col_lm2:
+        st.caption("This will empty the main dashboard log and delete all files in ~/.dashboard/logs/runs. Rotated dashboard logs are removed as well.")
 
 
 def render_config_tab() -> None:
@@ -1667,236 +1884,11 @@ def render_tools_tab() -> None:
     # The `active_runs` UI above provides per-PID controls and log tails, so no separate
     # Jupyter-specific section is required here.
 
-    # --- Global termination controls ---
-    st.subheader("Kill Process by PID")
-    st.caption("Send a termination signal to any running process by its PID. Use carefully.")
-    kill_pid_str = st.text_input("PID", value=st.session_state.get("kill_pid_str", ""), key="tools_kill_pid_input")
-    st.session_state["kill_pid_str"] = kill_pid_str
-    if st.button("Kill PID", key="tools_kill_pid_btn"):
-        try:
-            pid = int(kill_pid_str)
-        except Exception:
-            st.error("Please enter a valid integer PID.")
-        else:
-            before = get_status(pid)
-            if not before.get("known") and not before.get("running") and before.get("returncode") is None:
-                st.warning(f"PID {pid} is not tracked by the dashboard. Attempting termination anyway.")
-            try:
-                terminate_process(pid)
-            except Exception as e:
-                logging.getLogger("dashboard").exception("Failed to terminate PID")
-                st.error(f"Failed to terminate PID {pid}: {e}")
-            else:
-                after = get_status(pid)
-                st.success(f"Termination signal sent to PID {pid}.")
-                st.caption(f"Before: running={before.get('running')} rc={before.get('returncode')} | After: running={after.get('running')} rc={after.get('returncode')}")
+    # Global termination controls moved to the Monitoring tab (Running Processes section).
+    # See `render_logs_tab()` which now displays the Running Processes table and termination controls.
 
-    st.subheader("Terminate all active runs")
-    st.caption("Stops all processes started via the dashboard (modules, terminal, Jupyter) that are still tracked.")
-    if st.button("Terminate All", key="tools_terminate_all_btn"):
-        pids = list(ACTIVE_PROCS.keys())
-        if not pids:
-            st.info("No active tracked processes.")
-        else:
-            terminated = []
-            failed = []
-            for pid in pids:
-                try:
-                    ok = terminate_process(pid)
-                    if ok:
-                        terminated.append(pid)
-                    else:
-                        failed.append(pid)
-                except Exception:
-                    failed.append(pid)
-            if terminated:
-                st.success(f"Terminated: {', '.join(str(p) for p in terminated)}")
-            if failed:
-                st.warning(f"Failed/Not found: {', '.join(str(p) for p in failed)}")
-
-    # --- Running Processes table with multi-select terminate ---
-    st.subheader("Running Processes")
-    st.caption("Processes started by the dashboard and still running. Select multiple to terminate.")
-    try:
-        rows = []
-        for pid, p in list(ACTIVE_PROCS.items()):
-            stat = get_status(pid)
-            if not stat.get("running"):
-                continue
-            # Build command string
-            try:
-                args = getattr(p, "args", None)
-            except Exception:
-                args = None
-            if isinstance(args, (list, tuple)):
-                try:
-                    cmd_str = " ".join(shlex.quote(str(a)) for a in args)
-                except Exception:
-                    cmd_str = " ".join(str(a) for a in args)
-            else:
-                cmd_str = str(args) if args is not None else ""
-            # Heuristic name
-            name = "Process"
-            lc = (cmd_str or "").lower()
-            if "jupyter" in lc and "notebook" in lc:
-                name = "Jupyter Notebook"
-            elif " bash " in f" {lc} " and " -lc " in f" {lc} ":
-                name = "Terminal"
-            elif " -m " in f" {cmd_str} ":
-                try:
-                    parts = cmd_str.split()
-                    if "-m" in parts:
-                        mod = parts[parts.index("-m") + 1]
-                        name = mod.split(".")[-1]
-                except Exception:
-                    pass
-            elif isinstance(args, (list, tuple)) and args:
-                name = os.path.basename(str(args[0]))
-            # Truncate parameters for display
-            params_display = cmd_str
-            if len(params_display) > 200:
-                params_display = params_display[:200] + " …"
-            rows.append({
-                "select": False,
-                "pid": pid,
-                "name": name,
-                "parameters": params_display,
-            })
-        # Merge in any detached runs recorded in session_state (e.g., across reloads)
-        try:
-            existing_pids = {int(r.get("pid")) for r in rows if r.get("pid")}
-        except Exception:
-            existing_pids = set()
-        try:
-            new_active_runs = []
-            for r in list(st.session_state.get("active_runs", [])):
-                try:
-                    rp = int(r.get("pid"))
-                except Exception:
-                    # Skip entries without a valid pid
-                    continue
-                if rp in existing_pids:
-                    continue
-                # Check OS/runtime status for this pid; if not running remove from session list
-                stat = get_status(rp)
-                if not stat.get("running"):
-                    # Clean up finished/stale session entry
-                    try:
-                        st.session_state["active_runs"] = [x for x in st.session_state.get("active_runs", []) if int(x.get("pid") or -1) != rp]
-                    except Exception:
-                        # best-effort: ignore failures
-                        pass
-                    continue
-                # Still running; include in display
-                name = r.get("module") or "Process"
-                params_display = str(r.get("cmd") or "")
-                if len(params_display) > 200:
-                    params_display = params_display[:200] + " …"
-                new_active_runs.append({"select": False, "pid": rp, "name": name, "parameters": params_display})
-            if new_active_runs:
-                rows.extend(new_active_runs)
-        except Exception:
-            pass
-        if not rows:
-            st.info("No running processes.")
-        else:
-            edited = st.data_editor(
-                rows,
-                hide_index=True,
-                num_rows="fixed",
-                column_config={
-                    "select": st.column_config.CheckboxColumn("Select", help="Mark to terminate"),
-                    "pid": st.column_config.NumberColumn("PID"),
-                    "name": st.column_config.TextColumn("Name"),
-                    "parameters": st.column_config.TextColumn("Parameters"),
-                },
-                key="running_procs_editor",
-            )
-            # Collect selected PIDs
-            selected_pids = [int(r.get("pid")) for r in edited if r.get("select")]
-            c1, c2 = st.columns([1, 3])
-            with c1:
-                if st.button("Terminate Selected", key="terminate_selected_btn"):
-                    if not selected_pids:
-                        st.warning("No processes selected.")
-                    else:
-                        ok_list, fail_list = [], []
-                        for spid in selected_pids:
-                            try:
-                                ok = terminate_process(spid)
-                                (ok_list if ok else fail_list).append(spid)
-                            except Exception:
-                                fail_list.append(spid)
-                        if ok_list:
-                            st.success(f"Terminated: {', '.join(str(p) for p in ok_list)}")
-                        if fail_list:
-                            st.warning(f"Failed/Not found: {', '.join(str(p) for p in fail_list)}")
-                        try:
-                            st.rerun()
-                        except Exception:
-                            try:
-                                st.experimental_rerun()
-                            except Exception:
-                                pass
-            with c2:
-                st.caption("Tip: Use the checkboxes to select one or more processes, then click 'Terminate Selected'.")
-    except Exception as e:
-        logging.getLogger("dashboard").exception("Failed to render running processes table")
-        st.error(f"Failed to show running processes: {e}")
-
-    # --- Logs Maintenance ---
-    st.subheader("Logs Maintenance")
-    st.caption("Manage logs stored under your home at ~/.dashboard/logs. Clearing logs does not stop active processes.")
-    col_lm1, col_lm2 = st.columns([1, 3])
-    with col_lm1:
-        if st.button("Clear All Logs", key="tools_clear_all_logs_btn"):
-            cleared = {
-                "dashboard_log": False,
-                "rotated_logs": 0,
-                "run_logs": 0,
-            }
-            # Clear main dashboard log by truncating file; preserve file for handler
-            try:
-                os.makedirs(LOG_DIR, exist_ok=True)
-                if os.path.exists(LOG_FILE):
-                    with open(LOG_FILE, "w", encoding="utf-8") as f:
-                        f.write("")
-                    cleared["dashboard_log"] = True
-            except Exception:
-                logging.getLogger("dashboard").exception("Failed to truncate dashboard.log")
-            # Remove rotated dashboard logs (e.g., dashboard.log.1, .2)
-            try:
-                for name in os.listdir(LOG_DIR):
-                    if name.startswith("dashboard.log") and name != os.path.basename(LOG_FILE):
-                        path = os.path.join(LOG_DIR, name)
-                        try:
-                            if os.path.isfile(path):
-                                os.remove(path)
-                                cleared["rotated_logs"] += 1
-                        except Exception:
-                            pass
-            except Exception:
-                logging.getLogger("dashboard").exception("Failed to remove rotated dashboard logs")
-            # Clear run logs under ~/.dashboard/logs/runs
-            runs_dir = os.path.join(LOG_DIR, "runs")
-            try:
-                if os.path.isdir(runs_dir):
-                    for name in os.listdir(runs_dir):
-                        path = os.path.join(runs_dir, name)
-                        try:
-                            if os.path.isfile(path):
-                                os.remove(path)
-                                cleared["run_logs"] += 1
-                        except Exception:
-                            pass
-            except Exception:
-                logging.getLogger("dashboard").exception("Failed to clear run logs")
-            st.success(
-                f"Cleared logs: dashboard.log={'yes' if cleared['dashboard_log'] else 'no'}, "
-                f"rotated={cleared['rotated_logs']}, runs={cleared['run_logs']}"
-            )
-    with col_lm2:
-        st.caption("This will empty the main dashboard log and delete all files in ~/.dashboard/logs/runs. Rotated dashboard logs are removed as well.")
+    # Logs Maintenance moved to Monitoring tab
+    # See `render_logs_tab()` which now shows the Dashboard log tail and maintenance controls.
 
 
 def main() -> None:
