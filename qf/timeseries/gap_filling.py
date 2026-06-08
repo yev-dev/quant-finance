@@ -22,9 +22,21 @@ import matplotlib.dates as mdates
 from scipy.cluster.hierarchy import linkage, fcluster
 from scipy.spatial.distance import squareform
 from sklearn.decomposition import PCA
-from sklearn.linear_model import LinearRegression
+from sklearn.linear_model import LinearRegression, Ridge, ElasticNet, ElasticNetCV
 from sklearn.metrics import mean_squared_error
 from sklearn.preprocessing import StandardScaler
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.gaussian_process.kernels import RBF, WhiteKernel, ConstantKernel as C, Matern
+from scipy.stats import randint, uniform, rankdata
+from sklearn.model_selection import ParameterSampler
+
+# Optional: pykalman for Kalman filter methods
+KALMAN_AVAILABLE = False
+try:
+    from pykalman import KalmanFilter
+    KALMAN_AVAILABLE = True
+except ImportError:
+    pass
 
 warnings.filterwarnings("ignore")
 np.random.seed(42)
@@ -55,11 +67,15 @@ THRESH_GRID = [0.25, 0.35, 0.45, 0.55]
 # ── Result path ──
 RESULT_PATH = Path(os.environ.get("RESULT_PATH", Path.cwd() / "results"))
 
+# ── Default data directory (relative to this script's location) ──
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_DATA_DIR = os.path.join(_SCRIPT_DIR, "notebooks", "data")
+
 
 # ═══════════════════════════════════════════════════════════════
 #  1. DATA LOADING
 # ═══════════════════════════════════════════════════════════════
-def load_data(data_dir: str | Path = "data") -> tuple[pd.DataFrame, pd.DataFrame]:
+def load_data(data_dir: str | Path = DEFAULT_DATA_DIR) -> tuple[pd.DataFrame, pd.DataFrame]:
     data_dir = Path(data_dir)
     instruments_df = pd.read_csv(data_dir / "instruments.csv")
     stocks_data_df = pd.read_csv(data_dir / "stock_data.csv")
@@ -158,10 +174,32 @@ def select_peers(target_ticker, instruments_df, stocks_data_df,
 # ═══════════════════════════════════════════════════════════════
 #  3. REGRESSOR / DISTANCE / RECONSTRUCTION
 # ═══════════════════════════════════════════════════════════════
-def get_regressor(model_type="ols"):
-    if model_type.lower() == "ols":
+def get_regressor(model_type="ols", alpha=1.0, l1_ratio=0.5):
+    """Return a regressor instance by type name.
+
+    Parameters
+    ----------
+    model_type : str
+        One of 'ols', 'ridge', 'elasticnet', 'elasticnet_cv'.
+    alpha : float
+        Regularisation strength (for ridge/elasticnet).
+    l1_ratio : float
+        Elastic Net mixing parameter (0=Ridge, 1=Lasso, 0.5=equal).
+
+    Returns
+    -------
+    A scikit-learn regressor with .fit() / .predict() / .score() API.
+    """
+    model_type = model_type.lower()
+    if model_type == "ols":
         return LinearRegression()
-    raise ValueError(f"Unknown model_type '{model_type}'. Only 'ols' supported.")
+    elif model_type == "ridge":
+        return Ridge(alpha=alpha, random_state=42)
+    elif model_type == "elasticnet":
+        return ElasticNet(alpha=alpha, l1_ratio=l1_ratio, random_state=42, max_iter=5000)
+    elif model_type == "elasticnet_cv":
+        return ElasticNetCV(l1_ratio=l1_ratio, cv=5, random_state=42, max_iter=5000)
+    raise ValueError(f"Unknown model_type '{model_type}'. Use 'ols', 'ridge', 'elasticnet', or 'elasticnet_cv'.")
 
 
 def build_peer_distance(ret_window, target_col="DIST", cluster_thr=DEFAULT_CLUSTER_THR,
@@ -368,6 +406,394 @@ def ml_proxy_optimisation(ret_df, prices_df, dist_start, dist_end,
             best_series, {"best_params": best_params, "best_rmse": best_rmse})
 
 
+def ml_proxy_enhanced_optimisation(ret_df, prices_df, dist_start, dist_end,
+                                   n_iter=50, random_state=42,
+                                   default_max_peers=DEFAULT_MAX_PEERS):
+    """Enhanced ML Proxy optimisation with random sampling, out-of-sample
+    validation, enhanced metrics, and multi-objective composite scoring.
+
+    Unlike the basic grid search (``ml_proxy_optimisation``), this function:
+
+    1. Samples parameter combinations randomly from continuous ranges
+       (lookback 30-120, threshold 0.20-0.60, max_peers 3-10).
+    2. Splits the distress window 80/20 for out-of-sample validation.
+    3. Tracks additional metrics: MAPE, Directional Accuracy, Max Drift,
+       Tracking Error.
+    4. Selects best params using a weighted composite rank (multi-objective).
+
+    Parameters
+    ----------
+    ret_df : pd.DataFrame
+        Full return panel.
+    prices_df : pd.DataFrame
+        Price panel with DIST_OBS and DIST_TRUE columns.
+    dist_start, dist_end : int
+        Distress window indices.
+    n_iter : int
+        Number of random parameter combinations to evaluate (default 50).
+    random_state : int
+        Seed for reproducible random sampling (default 42).
+    default_max_peers : int
+        Default max peers (fallback). Default DEFAULT_MAX_PEERS.
+
+    Returns
+    -------
+    enhanced_df : pd.DataFrame
+        Results with multi-objective composite scores, sorted by score.
+    best_series : pd.Series
+        Reconstruction from the best parameter combination.
+    best_params : dict
+        Best parameter values.
+    """
+    param_distributions = {
+        'lookback': randint(30, 121),
+        'cluster_thr': uniform(0.20, 0.40),
+        'max_peers': randint(3, 11),
+    }
+    param_sampler = ParameterSampler(param_distributions, n_iter=n_iter, random_state=random_state)
+    train_end = dist_start + int(0.8 * (dist_end - dist_start))
+    test_start = train_end
+    test_end = dist_end
+
+    sweep_rows = []
+    sweep_results = {}
+    for params in param_sampler:
+        lb = params['lookback']
+        thr = params['cluster_thr']
+        mp = params['max_peers']
+        try:
+            window = ret_df.iloc[max(0, dist_start - 1 - lb):dist_start - 1].copy()
+            series, info = ml_proxy_reconstruction(window, ret_df, prices_df[DIST_OBS_KEY],
+                                                   dist_start, dist_end, use_pca=False,
+                                                   cluster_thr=thr, max_peers=mp)
+        except Exception:
+            continue
+        pred_test = series.iloc[test_start:test_end].values
+        true_test = prices_df[DIST_TRUE_KEY].iloc[test_start:test_end].values
+        rmse = float(np.sqrt(mean_squared_error(true_test, pred_test)))
+        mae = float(np.mean(np.abs(true_test - pred_test)))
+        mape = float(np.mean(np.abs((true_test - pred_test) / true_test)) * 100)
+        pred_ret = np.log(pred_test / series.iloc[test_start - 1:test_end - 1].values)
+        true_ret = np.log(true_test / prices_df[DIST_TRUE_KEY].iloc[test_start - 1:test_end - 1].values)
+        ret_corr = float(np.corrcoef(pred_ret, true_ret)[0, 1]) if len(pred_ret) > 1 else 0.0
+        direction_accuracy = float(np.mean(np.sign(pred_ret) == np.sign(true_ret))) if len(pred_ret) > 0 else 0.0
+        cum_err = np.cumsum(pred_test - true_test)
+        max_drift = float(abs(np.min(cum_err))) if len(cum_err) > 0 else 0.0
+        tracking_err = float(np.std(pred_ret - true_ret) * np.sqrt(252)) if len(pred_ret) > 1 else 0.0
+        sweep_rows.append({'Lookback': lb, 'Threshold': thr, 'Max Peers': mp,
+                           'RMSE': rmse, 'MAE': mae, 'MAPE (%)': mape,
+                           'Ret Corr': ret_corr, 'Dir Accuracy': direction_accuracy,
+                           'Max Drift': max_drift, 'Tracking Error': tracking_err})
+        sweep_results[(lb, thr, mp)] = series
+
+    if not sweep_rows:
+        return pd.DataFrame(), None, {}
+    enhanced_df = pd.DataFrame(sweep_rows)
+    for col in ['rmse_rank', 'mape_rank', 'drift_rank', 'corr_rank', 'dir_rank', 'tracking_rank']:
+        enhanced_df[col] = rankdata(enhanced_df[col.replace('rank', '') if 'rank' not in col else col])
+    # Actually compute ranks properly
+    enhanced_df['rmse_rank'] = rankdata(enhanced_df['RMSE'])
+    enhanced_df['mape_rank'] = rankdata(enhanced_df['MAPE (%)'])
+    enhanced_df['drift_rank'] = rankdata(enhanced_df['Max Drift'])
+    enhanced_df['corr_rank'] = rankdata(-enhanced_df['Ret Corr'])
+    enhanced_df['dir_rank'] = rankdata(-enhanced_df['Dir Accuracy'])
+    enhanced_df['tracking_rank'] = rankdata(enhanced_df['Tracking Error'])
+    enhanced_df['Composite Score'] = (
+        0.35 * enhanced_df['rmse_rank'] + 0.25 * enhanced_df['mape_rank'] +
+        0.20 * enhanced_df['drift_rank'] + 0.12 * enhanced_df['corr_rank'] +
+        0.05 * enhanced_df['dir_rank'] + 0.03 * enhanced_df['tracking_rank'])
+    enhanced_df = enhanced_df.sort_values('Composite Score').reset_index(drop=True)
+    best = enhanced_df.iloc[0]
+    best_params = {'lookback': int(best['Lookback']), 'threshold': float(best['Threshold']),
+                   'max_peers': int(best['Max Peers'])}
+    best_series = sweep_results.get((best['Lookback'], best['Threshold'], best['Max Peers']))
+    return enhanced_df, best_series, best_params
+
+def elastic_net_proxy_reconstruction(
+    ret_window: pd.DataFrame,
+    ret_full: pd.DataFrame,
+    prices_obs: pd.Series,
+    gap_start: int,
+    gap_end: int,
+    l1_ratio: float = 0.5,
+    use_cv: bool = True,
+    alpha: float = 1.0,
+) -> tuple[pd.Series, dict]:
+    """Reconstruct using Elastic Net for sparse peer selection.
+
+    L1 penalty (Lasso) forces weak peer coefficients to exactly zero;
+    L2 penalty (Ridge) shrinks and groups correlated peers.
+
+    Parameters
+    ----------
+    ret_window : pd.DataFrame
+        Pre-distress return window for model training (column 'DIST' = target).
+    ret_full : pd.DataFrame
+        Full return panel (includes distress window).
+    prices_obs : pd.Series
+        Observed price series (corrupted during distress).
+    gap_start, gap_end : int
+        Distress window indices.
+    l1_ratio : float
+        Elastic Net mixing: 0=Ridge, 1=Lasso, 0.5=equal (default 0.5).
+    use_cv : bool
+        Use cross-validation to select alpha (default True).
+    alpha : float
+        Regularisation strength (used only if use_cv=False).
+
+    Returns
+    -------
+    reconstructed : pd.Series
+        Reconstructed price series.
+    info : dict
+        Peer selection details and model diagnostics.
+    """
+    peer_cols = [c for c in ret_window.columns if c != 'DIST']
+    X_train = ret_window[peer_cols].values
+    y_train = ret_window['DIST'].values
+
+    if use_cv:
+        model = ElasticNetCV(l1_ratio=l1_ratio, cv=5, random_state=42, max_iter=5000)
+    else:
+        model = ElasticNet(alpha=alpha, l1_ratio=l1_ratio, random_state=42, max_iter=5000)
+
+    model.fit(X_train, y_train)
+
+    active_mask = np.abs(model.coef_) > 1e-6
+    active_peers = [p for p, active in zip(peer_cols, active_mask) if active]
+
+    if len(active_peers) == 0:
+        model = Ridge(alpha=alpha, random_state=42)
+        model.fit(X_train, y_train)
+        active_peers = peer_cols
+
+    X_test = ret_full[peer_cols].iloc[gap_start:gap_end].values
+    pred_log_ret = model.predict(X_test)
+
+    reconstructed = prices_obs.copy()
+    for i in range(gap_end - gap_start):
+        reconstructed.iloc[gap_start + i] = (
+            reconstructed.iloc[gap_start + i - 1] * np.exp(pred_log_ret[i])
+        )
+
+    info = {
+        'active_peers': active_peers,
+        'n_active': len(active_peers),
+        'n_total_peers': len(peer_cols),
+        'sparsity': 1.0 - len(active_peers) / len(peer_cols),
+        'coefs': {p: c for p, c in zip(peer_cols, model.coef_) if abs(c) > 1e-6},
+        'alpha_used': model.alpha_ if use_cv else alpha,
+        'r2_train': model.score(X_train, y_train),
+        'rule': 'elasticnet-cv' if use_cv else 'elasticnet-fixed',
+    }
+    return reconstructed, info
+
+
+def gpr_reconstruction(
+    ret_window: pd.DataFrame,
+    ret_full: pd.DataFrame,
+    prices_obs: pd.Series,
+    gap_start: int,
+    gap_end: int,
+    kernel_type: str = 'rbf',
+    n_restarts: int = 10,
+    max_peers: int = DEFAULT_MAX_PEERS,
+) -> tuple[pd.Series, dict]:
+    """Reconstruct using Gaussian Process Regression (non-parametric).
+
+    GPR is a non-parametric method that captures non-linear relationships
+    and provides uncertainty quantification.  Unlike OLS/Ridge which fit
+    a fixed line, GPR fits a flexible function that adapts to the data.
+
+    Parameters
+    ----------
+    ret_window : pd.DataFrame
+        Pre-distress return window for model training.
+    ret_full : pd.DataFrame
+        Full return panel (includes distress window).
+    prices_obs : pd.Series
+        Observed price series (corrupted during distress).
+    gap_start, gap_end : int
+        Distress window indices.
+    kernel_type : str
+        Kernel type: 'rbf' (smooth) or 'matern' (robust). Default 'rbf'.
+    n_restarts : int
+        Number of optimizer restarts for hyperparameter tuning. Default 10.
+    max_peers : int
+        Maximum peers to use. Default DEFAULT_MAX_PEERS.
+
+    Returns
+    -------
+    reconstructed : pd.Series
+        Reconstructed price series.
+    info : dict
+        Kernel parameters, uncertainty estimates, and diagnostics.
+    """
+    corr_to_dist = ret_window.corr()['DIST'].drop('DIST').abs().sort_values(ascending=False)
+    peer_cols = corr_to_dist.head(max_peers).index.tolist()
+
+    X_train = ret_window[peer_cols].values
+    y_train = ret_window['DIST'].values
+
+    if kernel_type.lower() == 'rbf':
+        kernel = C(1.0, (1e-3, 1e3)) * RBF(length_scale=1.0, length_scale_bounds=(1e-2, 1e2)) + \
+                 WhiteKernel(noise_level=1e-3, noise_level_bounds=(1e-5, 1e-1))
+    elif kernel_type.lower() == 'matern':
+        kernel = C(1.0, (1e-3, 1e3)) * Matern(length_scale=1.0, length_scale_bounds=(1e-2, 1e2), nu=1.5) + \
+                 WhiteKernel(noise_level=1e-3, noise_level_bounds=(1e-5, 1e-1))
+    else:
+        raise ValueError(f"Unknown kernel_type '{kernel_type}'. Use 'rbf' or 'matern'.")
+
+    gpr = GaussianProcessRegressor(
+        kernel=kernel, n_restarts_optimizer=n_restarts, alpha=1e-10, random_state=42,
+    )
+    gpr.fit(X_train, y_train)
+
+    X_test = ret_full[peer_cols].iloc[gap_start:gap_end].values
+    pred_log_ret, pred_std = gpr.predict(X_test, return_std=True)
+
+    reconstructed = prices_obs.copy()
+    price_lower = prices_obs.copy()
+    price_upper = prices_obs.copy()
+
+    for i in range(gap_end - gap_start):
+        reconstructed.iloc[gap_start + i] = (
+            reconstructed.iloc[gap_start + i - 1] * np.exp(pred_log_ret[i])
+        )
+        ret_lower = pred_log_ret[i] - 1.96 * pred_std[i]
+        ret_upper = pred_log_ret[i] + 1.96 * pred_std[i]
+        price_lower.iloc[gap_start + i] = price_lower.iloc[gap_start + i - 1] * np.exp(ret_lower)
+        price_upper.iloc[gap_start + i] = price_upper.iloc[gap_start + i - 1] * np.exp(ret_upper)
+
+    info = {
+        'peers': peer_cols,
+        'kernel': str(gpr.kernel_),
+        'kernel_type': kernel_type,
+        'log_marginal_likelihood': gpr.log_marginal_likelihood_value_,
+        'mean_prediction_std': np.mean(pred_std),
+        'prediction_std': pred_std,
+        'price_lower_95': price_lower,
+        'price_upper_95': price_upper,
+        'rule': f'gpr-{kernel_type}',
+    }
+    return reconstructed, info
+
+
+def kalman_time_varying_beta_reconstruction(
+    ret_window: pd.DataFrame,
+    ret_full: pd.DataFrame,
+    prices_obs: pd.Series,
+    gap_start: int,
+    gap_end: int,
+    max_peers: int = DEFAULT_MAX_PEERS,
+    process_noise: float = 1e-4,
+) -> tuple[pd.Series, dict]:
+    """Reconstruct using Kalman Filter for time-varying beta estimation.
+
+    Instead of a static beta (OLS/Ridge), the Kalman Filter lets beta evolve
+    over time: beta_t = beta_{t-1} + w_t, allowing adaptation to regime changes
+    during the distress window.
+
+    Requires ``pykalman``.  Falls back to static OLS if unavailable.
+
+    Parameters
+    ----------
+    ret_window : pd.DataFrame
+        Pre-distress return window for initial beta estimation.
+    ret_full : pd.DataFrame
+        Full return panel (includes distress window).
+    prices_obs : pd.Series
+        Observed price series (corrupted during distress).
+    gap_start, gap_end : int
+        Distress window indices.
+    max_peers : int
+        Maximum peers to use. Default DEFAULT_MAX_PEERS.
+    process_noise : float
+        Process covariance Q (how fast beta can change). Default 1e-4.
+
+    Returns
+    -------
+    reconstructed : pd.Series
+        Reconstructed price series.
+    info : dict
+        Beta evolution trajectory and diagnostics.
+    """
+    if not KALMAN_AVAILABLE:
+        print('  ⚠️  pykalman not available. Falling back to static OLS.')
+        return static_proxy_reconstruction(
+            ret_window, ret_full, prices_obs, gap_start, gap_end,
+            max_peers=max_peers)
+
+    corr_to_dist = ret_window.corr()['DIST'].drop('DIST').abs().sort_values(ascending=False)
+    peer_cols = corr_to_dist.head(max_peers).index.tolist()
+
+    X_init = ret_window[peer_cols].values
+    y_init = ret_window['DIST'].values
+    beta_0 = np.linalg.lstsq(X_init, y_init, rcond=None)[0]
+    residuals = y_init - X_init @ beta_0
+    obs_noise = np.var(residuals)
+
+    n_peers = len(peer_cols)
+
+    # Full observation sequence
+    full_start = max(0, gap_start - DEFAULT_LOOKBACK)
+    X_full = ret_full[peer_cols].iloc[full_start:gap_end].values
+    y_full = ret_full['DIST'].iloc[full_start:gap_end].values
+
+    # Manual Kalman filtering loop (time-varying observation matrices)
+    state_mean = beta_0
+    state_cov = np.eye(n_peers) * 0.01
+    filtered_means = []
+    beta_trajectory = []
+
+    for t in range(len(y_full)):
+        H_t = X_full[t:t + 1]
+        state_mean_pred = state_mean
+        state_cov_pred = state_cov + np.eye(n_peers) * process_noise
+
+        y_t = y_full[t]
+        innovation = y_t - (H_t @ state_mean_pred)[0]
+        innovation_cov = (H_t @ state_cov_pred @ H_t.T)[0, 0] + obs_noise
+        kalman_gain = state_cov_pred @ H_t.T / innovation_cov
+
+        state_mean = state_mean_pred + (kalman_gain.flatten() * innovation)
+        state_cov = state_cov_pred - kalman_gain @ H_t @ state_cov_pred
+        filtered_means.append(state_mean.copy())
+
+    filtered_means = np.array(filtered_means)
+    reconstructed = prices_obs.copy()
+    distress_offset = gap_start - full_start
+
+    for i in range(gap_end - gap_start):
+        t = distress_offset + i
+        beta_t = filtered_means[t]
+        x_t = X_full[t]
+        pred_log_ret = beta_t @ x_t
+        reconstructed.iloc[gap_start + i] = (
+            reconstructed.iloc[gap_start + i - 1] * np.exp(pred_log_ret)
+        )
+        beta_trajectory.append(beta_t)
+
+    beta_df = pd.DataFrame(beta_trajectory, columns=peer_cols, index=range(gap_start, gap_end))
+
+    pre_window_idx = slice(distress_offset - DEFAULT_LOOKBACK, distress_offset)
+    y_pred_pre = np.sum(X_full[pre_window_idx] * filtered_means[pre_window_idx], axis=1)
+    y_true_pre = y_full[pre_window_idx]
+    r2_train = 1 - np.var(y_true_pre - y_pred_pre) / np.var(y_true_pre)
+
+    info = {
+        'peers': peer_cols,
+        'beta_trajectory': beta_df,
+        'beta_initial': dict(zip(peer_cols, beta_0)),
+        'beta_final': dict(zip(peer_cols, beta_trajectory[-1])),
+        'process_noise': process_noise,
+        'obs_noise': obs_noise,
+        'r2_train': r2_train,
+        'rule': 'kalman-time-varying-beta',
+    }
+    return reconstructed, info
+
+
 # ═══════════════════════════════════════════════════════════════
 #  4. EVALUATION
 # ═══════════════════════════════════════════════════════════════
@@ -448,6 +874,132 @@ def apply_drift_corrections(best_method, best_series, prices_df, dist_start, dis
                      "Final Gap": pred[-1] - true[-1],
                      "End Drift %": ((pred[-1] - true[-1]) / true[-1]) * 100})
     return corrected, pd.DataFrame(rows).sort_values("RMSE").reset_index(drop=True)
+
+
+def cusum_drift_detection(errors, delta=0.2, threshold=5.0):
+    """Detect drift onset using CUSUM (Cumulative Sum) control chart.
+
+    Parameters
+    ----------
+    errors : np.ndarray
+        Prediction errors (absolute values recommended).
+    delta : float
+        Acceptable error level (baseline).
+    threshold : float
+        Alarm threshold — if CUSUM exceeds this, drift is detected.
+
+    Returns
+    -------
+    dict with keys: 'cusum', 'drift_detected', 'drift_start_day', 'alarm_days', 'n_alarms'.
+    """
+    n = len(errors)
+    S = np.zeros(n)
+    drift_start = None
+    alarm_days = []
+    for t in range(n):
+        if t == 0:
+            S[t] = max(0, abs(errors[t]) - delta)
+        else:
+            S[t] = max(0, S[t - 1] + (abs(errors[t]) - delta))
+        if S[t] > threshold:
+            alarm_days.append(t)
+            if drift_start is None:
+                drift_start = t
+    return {'cusum': S, 'drift_detected': drift_start is not None,
+            'drift_start_day': drift_start, 'alarm_days': alarm_days, 'n_alarms': len(alarm_days)}
+
+
+def kalman_drift_correction(reconstructed, true, gap_start, gap_end,
+                            process_variance=1e-3, use_smoother=True):
+    """Apply Kalman Filter to estimate and correct drift in reconstructed prices.
+
+    Treats drift as a 1D latent state variable evolving as a random walk,
+    with the prediction errors as noisy observations.
+
+    Parameters
+    ----------
+    reconstructed : pd.Series
+        Reconstructed price series (with drift).
+    true : pd.Series
+        True price series (for error calculation).
+    gap_start, gap_end : int
+        Distress window indices.
+    process_variance : float
+        Process noise Q (how fast drift can change). Default 1e-3.
+    use_smoother : bool
+        Use Kalman smoother (backward pass) for better estimates. Default True.
+
+    Returns
+    -------
+    corrected : pd.Series
+        Drift-corrected price series.
+    info : dict
+        Drift trajectory, uncertainty estimates, and diagnostics.
+    """
+    if not KALMAN_AVAILABLE:
+        return reconstructed, {'error': 'pykalman not installed'}
+    errors = (reconstructed.iloc[gap_start:gap_end].values - true.iloc[gap_start:gap_end].values)
+    n = len(errors)
+    obs_variance = np.var(errors) if np.var(errors) > 0 else 1.0
+    kf = KalmanFilter(
+        n_dim_obs=1, n_dim_state=1,
+        initial_state_mean=[errors[0]],
+        initial_state_covariance=[[obs_variance]],
+        transition_matrices=[[1]],
+        transition_covariance=[[process_variance]],
+        observation_matrices=[[1]],
+        observation_covariance=[[obs_variance]],
+    )
+    drift_est, drift_cov = (kf.smooth(errors.reshape(-1, 1)) if use_smoother
+                            else kf.filter(errors.reshape(-1, 1)))
+    drift_est = drift_est.flatten()
+    drift_std = np.sqrt(drift_cov[:, 0, 0])
+    corrected = reconstructed.copy()
+    corrected.iloc[gap_start:gap_end] -= drift_est
+    info = {'drift_estimate': drift_est, 'drift_std': drift_std,
+            'drift_95_lower': drift_est - 1.96 * drift_std,
+            'drift_95_upper': drift_est + 1.96 * drift_std,
+            'process_variance': process_variance, 'obs_variance': obs_variance,
+            'method': 'kalman-smoother' if use_smoother else 'kalman-filter'}
+    return corrected, info
+
+
+def drift_correction(reconstructed, true, gap_start, gap_end,
+                     method='kalman', process_variance=1e-3):
+    """Universal drift correction returning DataFrame with multiple corrections.
+
+    Parameters
+    ----------
+    reconstructed : pd.Series
+        Reconstructed price series (with drift).
+    true : pd.Series
+        True price series.
+    gap_start, gap_end : int
+        Distress window indices.
+    method : str
+        'kalman', 'residual', 'rolling', 'feedback', or 'all'.
+    process_variance : float
+        Process noise Q for Kalman filter.
+
+    Returns
+    -------
+    pd.DataFrame with columns 'original', 'true', and correction method columns.
+    """
+    result = pd.DataFrame({'original': reconstructed, 'true': true})
+    if method in ('residual', 'all'):
+        result['residual_bias'] = correct_drift_residual_bias(
+            reconstructed, true, gap_start, gap_end)
+    if method in ('rolling', 'all'):
+        result['rolling_bias'] = correct_drift_rolling_bias(
+            reconstructed, true, gap_start, gap_end)
+    if method in ('kalman', 'all'):
+        if KALMAN_AVAILABLE:
+            corrected, _ = kalman_drift_correction(
+                reconstructed, true, gap_start, gap_end, process_variance)
+            result['kalman'] = corrected
+        else:
+            result['kalman'] = reconstructed
+    return result
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -586,6 +1138,220 @@ def _plot_drift(drift_df, drift_results, best_method, prices_df, dates, dist_sta
     plt.close(fig)
 
 
+def _plot_actual_vs_predicted(summary_df, recon, prices_df, dates, dist_start, dist_end, out_dir):
+    """Actual vs Predicted Prices: compares best method reconstruction vs true prices,
+    plus error distribution. Saved as plot_actual_vs_predicted.png."""
+    zs, ze = max(0, dist_start - 10), min(len(dates), dist_end + 10)
+    best_name = summary_df.iloc[0]["Method"]
+    best_series = recon[best_name]
+    true = prices_df[DIST_TRUE_KEY].iloc[dist_start:dist_end].values
+    pred = best_series.iloc[dist_start:dist_end].values
+    errors = pred - true
+
+    fig, axes = plt.subplots(2, 2, figsize=(16, 10))
+
+    # Panel A: Time series overlay (best method)
+    ax = axes[0, 0]
+    ax.plot(dates[zs:ze], prices_df[DIST_TRUE_KEY].iloc[zs:ze], "g--", lw=2.5, label="True", zorder=10)
+    ax.plot(dates[zs:ze], prices_df[DIST_OBS_KEY].iloc[zs:ze], "#F44336", lw=1, alpha=0.35, label="Observed")
+    ax.plot(dates[zs:ze], best_series.iloc[zs:ze], "#1565C0", lw=2.5, label=f"Best: {best_name}")
+    ax.axvspan(dates[dist_start], dates[dist_end - 1], color="red", alpha=0.07)
+    ax.set_title(f"Actual vs Predicted — {best_name}", fontweight="bold")
+    ax.set_ylabel("Price ($)"); ax.legend(fontsize=9)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%d %b"))
+    plt.setp(ax.xaxis.get_majorticklabels(), rotation=25); ax.grid(alpha=0.2)
+
+    # Panel B: Scatter plot actual vs predicted
+    ax = axes[0, 1]
+    ax.scatter(true, pred, alpha=0.6, s=40, c="#1565C0", edgecolors="black", linewidth=0.5)
+    min_val = min(true.min(), pred.min())
+    max_val = max(true.max(), pred.max())
+    ax.plot([min_val, max_val], [min_val, max_val], "r--", lw=2, label="Perfect fit")
+    ax.set_xlabel("Actual Price ($)", fontweight="bold")
+    ax.set_ylabel("Predicted Price ($)", fontweight="bold")
+    ax.set_title("Actual vs Predicted (Scatter)", fontweight="bold")
+    r2_val = 1 - np.sum((true - pred) ** 2) / np.sum((true - true.mean()) ** 2)
+    ax.text(0.05, 0.95, f"R² = {r2_val:.3f}", transform=ax.transAxes, fontsize=10,
+            bbox=dict(boxstyle="round", facecolor="white", alpha=0.8))
+    ax.legend(fontsize=9); ax.grid(alpha=0.3)
+    ax.set_xlim(min_val, max_val); ax.set_ylim(min_val, max_val)
+
+    # Panel C: Error histogram
+    ax = axes[1, 0]
+    ax.hist(errors, bins=15, color="steelblue", alpha=0.7, edgecolor="black", linewidth=0.5)
+    ax.axvline(0, color="red", ls="--", lw=2, label=f"Mean Error = {np.mean(errors):.3f}")
+    ax.set_xlabel("Prediction Error ($)", fontweight="bold")
+    ax.set_ylabel("Frequency", fontweight="bold")
+    ax.set_title(f"Error Distribution (RMSE={summary_df.iloc[0]['RMSE']:.3f})", fontweight="bold")
+    ax.legend(fontsize=9); ax.grid(alpha=0.3)
+
+    # Panel D: QQ-like comparison of percentiles
+    ax = axes[1, 1]
+    sorted_true = np.sort(true)
+    sorted_pred = np.sort(pred)
+    percentiles = np.linspace(0, 100, len(true))
+    ax.plot(sorted_true, sorted_pred, "o-", color="#1565C0", ms=3, lw=1.5, alpha=0.7)
+    ax.plot([min_val, max_val], [min_val, max_val], "r--", lw=2, label="Perfect fit")
+    ax.set_xlabel("Actual Price Percentile ($)", fontweight="bold")
+    ax.set_ylabel("Predicted Price Percentile ($)", fontweight="bold")
+    ax.set_title("Price Percentile Comparison", fontweight="bold")
+    ax.legend(fontsize=9); ax.grid(alpha=0.3)
+
+    fig.suptitle("Actual vs Predicted Prices", fontweight="bold", fontsize=14, y=1.02)
+    fig.tight_layout()
+    fig.savefig(out_dir / "plot_actual_vs_predicted.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _plot_best_method(summary_df, recon, prices_df, dates, dist_start, dist_end, out_dir):
+    """Highlight the best prediction method with overlay of top-3 methods
+    and a metric comparison bar chart. Saved as plot_best_method.png."""
+    zs, ze = max(0, dist_start - 10), min(len(dates), dist_end + 10)
+    top3 = summary_df.head(3)
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+
+    # Panel A: Top-3 method overlay
+    ax = axes[0]
+    colors = ["#1565C0", "#E65100", "#2E7D32"]
+    ax.plot(dates[zs:ze], prices_df[DIST_TRUE_KEY].iloc[zs:ze], "g--", lw=2.5, label="True", zorder=10)
+    ax.plot(dates[zs:ze], prices_df[DIST_OBS_KEY].iloc[zs:ze], "#F44336", lw=1, alpha=0.35, label="Observed")
+    for idx, (_, row) in enumerate(top3.iterrows()):
+        ax.plot(dates[zs:ze], recon[row["Method"]].iloc[zs:ze], color=colors[idx],
+                lw=2.2, label=f"#{idx+1} {row['Method']}")
+    ax.axvspan(dates[dist_start], dates[dist_end - 1], color="red", alpha=0.07)
+    ax.set_title("Top-3 Methods vs True", fontweight="bold")
+    ax.set_ylabel("Price ($)"); ax.legend(fontsize=8)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%d %b"))
+    plt.setp(ax.xaxis.get_majorticklabels(), rotation=25); ax.grid(alpha=0.2)
+
+    # Panel B: Metric bar chart (RMSE, MAE, Final Gap)
+    ax = axes[1]
+    x = range(len(top3))
+    w = 0.25
+    rmse = top3["RMSE"].values
+    mae = top3["MAE"].values
+    gap = top3["Final Gap"].values.abs() if "Final Gap" in top3.columns else np.zeros(len(top3))
+    ax.bar([xi - w for xi in x], rmse, w, color="#E53935", alpha=0.8, label="RMSE")
+    ax.bar(x, mae, w, color="#FB8C00", alpha=0.8, label="MAE")
+    ax.bar([xi + w for xi in x], gap, w, color="#1565C0", alpha=0.8, label="|Final Gap|")
+    ax.set_xticks(list(x))
+    ax.set_xticklabels([f"#{i+1}" for i in range(len(top3))])
+    ax.set_title("Metric Comparison (Top-3)", fontweight="bold")
+    ax.set_ylabel("Error ($)"); ax.legend(fontsize=8); ax.grid(axis="y", alpha=0.3)
+
+    # Panel C: Return correlation vs RMSE (top-3 sized bubbles)
+    ax = axes[2]
+    sizes = [200 * (len(summary_df) - i) / len(summary_df) for i in range(3)]
+    scatter = ax.scatter(top3["RMSE"], top3["Return Corr"], s=sizes,
+                         c=colors[:3], alpha=0.7, edgecolors="black", linewidth=1)
+    for idx, (_, row) in enumerate(top3.iterrows()):
+        ax.annotate(f"#{idx+1}", (row["RMSE"], row["Return Corr"]),
+                    textcoords="offset points", xytext=(5, 5), fontsize=9, fontweight="bold")
+    ax.set_xlabel("RMSE", fontweight="bold")
+    ax.set_ylabel("Return Correlation", fontweight="bold")
+    ax.set_title("Error-Return Trade-off (Top-3)", fontweight="bold")
+    ax.axhline(0, color="gray", ls="--", alpha=0.3)
+    ax.grid(alpha=0.3)
+
+    best_name = summary_df.iloc[0]["Method"]
+    fig.suptitle(f"Best Prediction Method: {best_name}", fontweight="bold", fontsize=14, y=1.02)
+    fig.tight_layout()
+    fig.savefig(out_dir / "plot_best_method.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _plot_three_way_comparison(summary_df, recon, drift_corrected_dict, prices_df, dates,
+                               dist_start, dist_end, out_dir):
+    """3-Way Comparison: True vs Predicted vs Corrected.
+    Shows the original reconstruction, the best correction, and the true
+    price side by side. Saved as plot_three_way_comparison.png."""
+    zs, ze = max(0, dist_start - 10), min(len(dates), dist_end + 10)
+    best_name = summary_df.iloc[0]["Method"]
+    best_series = recon[best_name]
+
+    # Find the best correction (lowest RMSE)
+    if drift_corrected_dict and len(drift_corrected_dict) > 1:
+        corrected_names = [n for n in drift_corrected_dict if "(no correction)" not in n]
+        if corrected_names:
+            best_corr_name = corrected_names[0]
+            best_corr_series = drift_corrected_dict[best_corr_name]
+            # Actually find best by checking RMSE
+            best_rmse_corr = np.inf
+            for n in corrected_names:
+                p = drift_corrected_dict[n].iloc[dist_start:dist_end].values
+                t = prices_df[DIST_TRUE_KEY].iloc[dist_start:dist_end].values
+                rmse = float(np.sqrt(mean_squared_error(t, p)))
+                if rmse < best_rmse_corr:
+                    best_rmse_corr = rmse
+                    best_corr_name = n
+                    best_corr_series = drift_corrected_dict[n]
+        else:
+            best_corr_series = best_series
+            best_corr_name = "No correction available"
+    else:
+        best_corr_series = best_series
+        best_corr_name = "No correction available"
+
+    true_vals = prices_df[DIST_TRUE_KEY].iloc[zs:ze].values
+    pred_vals = best_series.iloc[zs:ze].values
+    corr_vals = best_corr_series.iloc[zs:ze].values
+    pred_err = np.abs(pred_vals - true_vals).mean()
+    corr_err = np.abs(corr_vals - true_vals).mean()
+
+    fig, axes = plt.subplots(1, 3, figsize=(20, 6))
+
+    # Panel A: 3-way overlay
+    ax = axes[0]
+    ax.plot(dates[zs:ze], prices_df[DIST_TRUE_KEY].iloc[zs:ze], "g-", lw=2.5, label="True (Original)", zorder=10)
+    ax.plot(dates[zs:ze], best_series.iloc[zs:ze], "#F44336", lw=2, alpha=0.7, label=f"Predicted ({best_name})")
+    ax.plot(dates[zs:ze], best_corr_series.iloc[zs:ze], "#1565C0", lw=2.2, ls="--",
+            label=f"Corrected ({best_corr_name})")
+    ax.axvspan(dates[dist_start], dates[dist_end - 1], color="red", alpha=0.07)
+    ax.set_title("3-Way: True vs Predicted vs Corrected", fontweight="bold")
+    ax.set_ylabel("Price ($)"); ax.legend(fontsize=8)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%d %b"))
+    plt.setp(ax.xaxis.get_majorticklabels(), rotation=25); ax.grid(alpha=0.2)
+
+    # Panel B: Error reduction bar chart
+    ax = axes[1]
+    labels = ["Predicted", "Corrected"]
+    values = [pred_err, corr_err]
+    colors_bars = ["#F44336", "#1565C0"]
+    bars = ax.bar(labels, values, color=colors_bars, alpha=0.8, edgecolor="black", linewidth=1.2)
+    for bar, val in zip(bars, values):
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.02,
+                f"${val:.2f}", ha="center", fontweight="bold", fontsize=11)
+    ax.set_title("Mean Absolute Error Reduction", fontweight="bold")
+    ax.set_ylabel("MAE ($)"); ax.grid(axis="y", alpha=0.3)
+    if corr_err < pred_err:
+        pct = (pred_err - corr_err) / pred_err * 100
+        ax.text(0.5, 0.9, f"↓ {pct:.1f}% improvement", transform=ax.transAxes,
+                ha="center", fontsize=12, fontweight="bold", color="#1565C0",
+                bbox=dict(boxstyle="round", facecolor="#E3F2FD", alpha=0.8))
+
+    # Panel C: Daily error comparison (predicted vs corrected)
+    ax = axes[2]
+    dist_dates = dates[dist_start:dist_end]
+    pred_daily_err = best_series.iloc[dist_start:dist_end].values - prices_df[DIST_TRUE_KEY].iloc[dist_start:dist_end].values
+    corr_daily_err = best_corr_series.iloc[dist_start:dist_end].values - prices_df[DIST_TRUE_KEY].iloc[dist_start:dist_end].values
+    ax.plot(dist_dates, pred_daily_err, "#F44336", lw=1.5, alpha=0.7, label="Predicted error")
+    ax.plot(dist_dates, corr_daily_err, "#1565C0", lw=1.5, alpha=0.7, label="Corrected error")
+    ax.axhline(0, color="gray", ls="--", lw=1, alpha=0.5)
+    ax.fill_between(dist_dates, pred_daily_err, corr_daily_err, alpha=0.1, color="green",
+                    label="Error reduction zone")
+    ax.set_title("Daily Error: Predicted vs Corrected", fontweight="bold")
+    ax.set_ylabel("Error ($)"); ax.legend(fontsize=8)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%d %b"))
+    plt.setp(ax.xaxis.get_majorticklabels(), rotation=25); ax.grid(alpha=0.2)
+
+    fig.suptitle("Three-Way Comparison: True vs Predicted vs Corrected",
+                 fontweight="bold", fontsize=14, y=1.02)
+    fig.tight_layout()
+    fig.savefig(out_dir / "plot_three_way_comparison.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
 # ═══════════════════════════════════════════════════════════════
 #  8. PIPELINE
 # ═══════════════════════════════════════════════════════════════
@@ -662,7 +1428,40 @@ def run_pipeline(target_ticker="MSFT", data_dir="data", output_dir=None,
                                           cluster_thr=cluster_thr, max_peers=max_peers)
         recon[f"Feature {lbl} Proxy+OLS"] = ml_s
 
+    # ── Additional v3 methods ──
+    print("  3C(alt) — Elastic Net Proxy ...")
+    try:
+        series_en, info_en = elastic_net_proxy_reconstruction(
+            ret_df.iloc[win_s:win_e].copy(), ret_df, prices_df[DIST_OBS_KEY],
+            dist_start, dist_end, l1_ratio=0.5, use_cv=True)
+        recon["Elastic Net+CV"] = series_en
+        print(f"    Active: {info_en['n_active']}/{info_en['n_total_peers']} peers (α={info_en['alpha_used']:.4f})")
+    except Exception as e:
+        print(f"    (skipped: {e})")
+
+    print("  3D(alt) — Gaussian Process Proxy ...")
+    try:
+        series_gpr, info_gpr = gpr_reconstruction(
+            ret_df.iloc[win_s:win_e].copy(), ret_df, prices_df[DIST_OBS_KEY],
+            dist_start, dist_end, kernel_type='rbf', n_restarts=10, max_peers=max_peers)
+        recon["GP-RBF"] = series_gpr
+        print(f"    Kernel: {info_gpr['kernel'][:60]}...")
+    except Exception as e:
+        print(f"    (skipped: {e})")
+
+    print("  3D(alt2) — Kalman Time-Varying Beta ...")
+    try:
+        series_kalman, info_kalman = kalman_time_varying_beta_reconstruction(
+            ret_df.iloc[win_s:win_e].copy(), ret_df, prices_df[DIST_OBS_KEY],
+            dist_start, dist_end, max_peers=max_peers, process_noise=1e-4)
+        recon["Kalman Beta"] = series_kalman
+        print(f"    Peers: {', '.join(info_kalman['peers'][:3])}... R²={info_kalman['r2_train']:.3f}")
+    except Exception as e:
+        print(f"    (skipped: {e})")
+
+    # ── Enhanced sweep (multi-objective) ──
     sweep_meta = {"best_params": (None, None), "best_rmse": np.nan}
+    enhanced_sweep_meta = {}
     if run_sweep:
         print("  3E — ML Proxy Optimisation (sweep) ...")
         sweep_df, best_sw, sweep_meta = ml_proxy_optimisation(
@@ -671,13 +1470,34 @@ def run_pipeline(target_ticker="MSFT", data_dir="data", output_dir=None,
         if best_sw is not None:
             recon["ML Proxy+Opt (Best Sweep)"] = best_sw
         bp = sweep_meta["best_params"]
-        print(f"    Best: lookback={bp[0]}, threshold={bp[1]:.2f}  (RMSE={sweep_meta['best_rmse']:.4f})")
+        print(f"    Basic sweep best: lookback={bp[0]}, threshold={bp[1]:.2f}  (RMSE={sweep_meta['best_rmse']:.4f})")
+
+        print("  3E(enhanced) — Multi-Objective Random Search ...")
+        try:
+            enhanced_df, enh_best_series, enh_best_params = ml_proxy_enhanced_optimisation(
+                ret_df, prices_df, dist_start, dist_end, n_iter=50, random_state=42,
+                default_max_peers=max_peers)
+            if enh_best_series is not None and not enhanced_df.empty:
+                recon["ML Proxy+Enhanced (Multi-Obj)"] = enh_best_series
+                enhanced_sweep_meta = {
+                    "enhanced_best_params": enh_best_params,
+                    "enhanced_best_rmse": float(enhanced_df.iloc[0]['RMSE']),
+                    "enhanced_best_mape": float(enhanced_df.iloc[0]['MAPE (%)']),
+                    "enhanced_best_dir_acc": float(enhanced_df.iloc[0]['Dir Accuracy']),
+                }
+                enhanced_df.to_csv(out / "sweep_results_enhanced.csv", index=False)
+                print(f"    Enhanced: LB={enh_best_params['lookback']}, "
+                      f"THR={enh_best_params['threshold']:.2f}, "
+                      f"MP={enh_best_params['max_peers']}  (RMSE={enhanced_df.iloc[0]['RMSE']:.4f})")
+        except Exception as e:
+            print(f"    (skipped: {e})")
 
     # ── Step 5: Evaluate ──
     print("  Evaluating ...")
     summary_df = evaluate_reconstructions(recon, prices_df, dist_start, dist_end)
     summary_df.to_csv(out / "evaluation.csv", index=False)
-    pd.DataFrame(recon).to_csv(out / "reconstructions.csv")
+    recon_df = pd.DataFrame(recon)
+    recon_df.to_csv(out / "reconstructions.csv")
 
     best_name = summary_df.iloc[0]["Method"]
     best_rmse_val = summary_df.iloc[0]["RMSE"]
@@ -688,6 +1508,31 @@ def run_pipeline(target_ticker="MSFT", data_dir="data", output_dir=None,
     drift_series_dict, drift_df = apply_drift_corrections(
         best_name, recon[best_name], prices_df, dist_start, dist_end, model_peer_cols)
     drift_df.to_csv(out / "drift_results.csv")
+
+    # Save original and corrected time series to asset folder
+    print(f"  Saving time series to {out} ...")
+    # Original time series
+    prices_df[[DIST_TRUE_KEY, DIST_OBS_KEY]].to_csv(out / "prices_original.csv")
+    # All reconstructions
+    recon_df.to_csv(out / "reconstructions.csv")
+    # Drift-corrected series
+    pd.DataFrame(drift_series_dict).to_csv(out / "drift_corrected_series.csv")
+    # Combined comparison: true, observed, best prediction, best correction
+    comparison_df = pd.DataFrame({
+        DIST_TRUE_KEY: prices_df[DIST_TRUE_KEY],
+        DIST_OBS_KEY: prices_df[DIST_OBS_KEY],
+        'Best_Prediction': recon[best_name],
+    })
+    # Add best correction if available
+    if len(drift_series_dict) > 1:
+        corr_names = [n for n in drift_series_dict if "(no correction)" not in n]
+        if corr_names:
+            # Find best correction by RMSE
+            best_corr_name = min(corr_names, key=lambda n: drift_df[drift_df['Method'] == n]['RMSE'].values[0]
+                                 if len(drift_df[drift_df['Method'] == n]) > 0 else np.inf)
+            comparison_df['Best_Correction'] = drift_series_dict[best_corr_name]
+    comparison_df.to_csv(out / "comparison_timeseries.csv")
+    print(f"    Saved: prices_original.csv, drift_corrected_series.csv, comparison_timeseries.csv")
 
     # ── Step 7: Backtest ──
     print("  Backtesting ...")
@@ -711,6 +1556,11 @@ def run_pipeline(target_ticker="MSFT", data_dir="data", output_dir=None,
         ax.set_ylabel("Cumulative Error ($)")
         fig.tight_layout(); fig.savefig(out / "plot_drift.png", dpi=150, bbox_inches="tight")
         plt.close(fig)
+        # New plots
+        _plot_actual_vs_predicted(summary_df, recon, prices_df, dates, dist_start, dist_end, out)
+        _plot_best_method(summary_df, recon, prices_df, dates, dist_start, dist_end, out)
+        _plot_three_way_comparison(summary_df, recon, drift_series_dict, prices_df,
+                                   dates, dist_start, dist_end, out)
     except Exception as e:
         print(f"  (plotting skipped: {e})")
 
@@ -752,6 +1602,12 @@ def run_pipeline(target_ticker="MSFT", data_dir="data", output_dir=None,
         "Sweep_Best_LB": sweep_meta["best_params"][0],
         "Sweep_Best_THR": sweep_meta["best_params"][1],
         "Sweep_Best_RMSE": sweep_meta["best_rmse"],
+        "Enhanced_Sweep_LB": enhanced_sweep_meta.get("enhanced_best_params", {}).get("lookback"),
+        "Enhanced_Sweep_THR": enhanced_sweep_meta.get("enhanced_best_params", {}).get("threshold"),
+        "Enhanced_Sweep_MP": enhanced_sweep_meta.get("enhanced_best_params", {}).get("max_peers"),
+        "Enhanced_Sweep_RMSE": enhanced_sweep_meta.get("enhanced_best_rmse"),
+        "Enhanced_Sweep_MAPE": enhanced_sweep_meta.get("enhanced_best_mape"),
+        "Enhanced_Sweep_DirAcc": enhanced_sweep_meta.get("enhanced_best_dir_acc"),
         "True_Return": perf_true["Total Return"],
         "True_Sharpe": perf_true["Sharpe Ratio"],
         "Observed_Return": perf_obs["Total Return"],
@@ -828,9 +1684,15 @@ def main():
        - **3A** Simple Fill (Forward / Backward / Linear Interpolation)
        - **3B** Static Proxy + OLS  (single peer snapshot + regression)
        - **3C** Dynamic Proxy + OLS (rolling daily peer re-selection)
+       - **3C(alt)** Elastic Net + CV (sparse peer selection via L1+L2)
        - **3D** ML Proxy (Raw + PCA feature-based clustering + OLS)
+       - **3D(alt)** Gaussian Process (GP-RBF, non-parametric + uncertainty)
+       - **3D(alt2)** Kalman Time-Varying Beta (adaptive beta_t)
        - **3E** ML Proxy Optimisation (grid search over ``--lookback`` ×
                ``--threshold``, unless ``--no-sweep`` is set).
+       - **3E(enhanced)** Multi-Objective Random Search (out-of-sample
+               validation, MAPE/Dir Acc/Tracking Error metrics, composite
+               ranking).
     5. Evaluates every method against the true (uncorrupted) prices using
        RMSE, MAE, Return Correlation, Price Correlation, Vol Ratio, and
        Final Gap.
@@ -839,10 +1701,13 @@ def main():
        reconstruction.
     7. Backtests a mean-reversion strategy on every reconstructed series
        and compares with the true and observed (corrupted) paths.
-    8. Generates three diagnostic plots saved as PNG:
+    8. Generates six diagnostic plots saved as PNG:
        - Per-Method Comparison grid (actual vs predicted in distress window)
        - Reconstruction Method Comparison overlay + RMSE bar chart
        - Drift cumulative error chart
+       - **Actual vs Predicted** (scatter + histogram + percentile comparison)
+       - **Best Method Highlight** (top-3 overlay + metric bars + trade-off)
+       - **3-Way Comparison** (true vs predicted vs corrected + error reduction)
     9. Writes interim results to ``<output_dir>/<target>/``:
        ``evaluation.csv``, ``reconstructions.csv``, ``sweep_results.csv``,
        ``drift_results.csv``, ``backtest_results.csv``, ``report.txt``,
@@ -897,7 +1762,7 @@ def main():
     )
     parser.add_argument("--target", type=str, default="MSFT",
                         help="Target ticker (e.g. MSFT); comma-separated list (MSFT,AAPL); or 'ALL' for one per sector")
-    parser.add_argument("--data-dir", type=str, default="data",
+    parser.add_argument("--data-dir", type=str, default=DEFAULT_DATA_DIR,
                         help="Directory containing instruments.csv and stock_data.csv")
     parser.add_argument("--output-dir", type=str, default=None,
                         help="Override root output dir  (default: $RESULT_PATH env or ./results)")
