@@ -9,9 +9,12 @@ Uses RESULT_PATH env variable (default: ./results).
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import warnings
+from dataclasses import dataclass, field, asdict
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -28,7 +31,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import RBF, WhiteKernel, ConstantKernel as C, Matern
 from scipy.stats import randint, uniform, rankdata
-from sklearn.model_selection import ParameterSampler
+from sklearn.model_selection import ParameterSampler, TimeSeriesSplit
 
 # Optional: pykalman for Kalman filter methods
 KALMAN_AVAILABLE = False
@@ -50,25 +53,72 @@ except ImportError:
 
 plt.rcParams.update({"figure.figsize": (14, 5), "font.size": 11})
 
-# ── Defaults ──
-DEFAULT_LOOKBACK = 80
-DEFAULT_CLUSTER_THR = 0.35
-DEFAULT_MAX_PEERS = 5
-DEFAULT_MIN_PEERS = 2
-DEFAULT_N_DAYS = 500
-DEFAULT_DIST_DEPTH = 0.35
-DEFAULT_DIST_LENGTH = 30
+# ── Column name constants ──
 DIST_OBS_KEY = "DIST_OBS"
 DIST_TRUE_KEY = "DIST_TRUE"
 TARGET_ORIG_KEY = "TARGET_ORIG"
-LOOKBACK_GRID = [40, 60, 80, 120]
-THRESH_GRID = [0.25, 0.35, 0.45, 0.55]
+
+# ── Default config path (sibling to this file) ──
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_PATH = os.path.join(_SCRIPT_DIR, "config.json")
+
+# ── Backward-compatible default constants ──
+def _load_config() -> dict:
+    """Load configuration from the sibling config.json file.
+
+    Returns a flat-enough dict of defaults.  Falls back to hard-coded
+    values if ``config.json`` is missing or malformed.
+    """
+    try:
+        with open(CONFIG_PATH) as fh:
+            cfg = json.load(fh)
+        return cfg
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+_CFG = _load_config()
+
+def _override_config(config_path: str | Path) -> None:
+    """Replace the global config with a custom config file."""
+    global _CFG
+    with open(str(config_path)) as fh:
+        _CFG = json.load(fh)
+
+def _c(*keys: str, default: Any = None) -> Any:
+    """Safely traverse nested config dict.
+
+    Examples
+    --------
+    >>> _c("peers", "lookback", default=80)
+    """
+    d: Any = _CFG
+    for k in keys:
+        if not isinstance(d, dict):
+            return default
+        d = d.get(k)
+        if d is None:
+            return default
+    return d
+
+# ── Backward-compatible default constants ──
+DEFAULT_LOOKBACK    = _c("peers", "lookback", default=80)
+DEFAULT_CLUSTER_THR = _c("peers", "cluster_thr", default=0.35)
+DEFAULT_MAX_PEERS   = _c("peers", "max_peers", default=5)
+DEFAULT_MIN_PEERS   = _c("peers", "min_peers", default=2)
+DEFAULT_N_DAYS      = _c("data", "n_days", default=500)
+DEFAULT_DIST_DEPTH  = _c("distress", "dist_depth", default=0.35)
+DEFAULT_DIST_LENGTH = _c("distress", "dist_length", default=30)
+DEFAULT_DIST_START_DATE = _c("distress", "dist_start_date", default=None)
+DEFAULT_DIST_END_DATE   = _c("distress", "dist_end_date", default=None)
+LOOKBACK_GRID       = _c("sweep", "lookback_grid", default=[40, 60, 80, 120])
+THRESH_GRID         = _c("sweep", "threshold_grid", default=[0.25, 0.35, 0.45, 0.55])
 
 # ── Result path ──
-RESULT_PATH = Path(os.environ.get("RESULT_PATH", Path.cwd() / "results"))
+_RESULT_PATH_ENV = _c("paths", "result_path_env_var", default="RESULT_PATH")
+_RESULT_PATH_DEF = _c("paths", "result_path_default", default="./results")
+RESULT_PATH = Path(os.environ.get(_RESULT_PATH_ENV, Path.cwd() / _RESULT_PATH_DEF))
 
 # ── Default data directory (relative to this script's location) ──
-_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_DATA_DIR = os.path.join(_SCRIPT_DIR, "notebooks", "data")
 
 
@@ -88,8 +138,16 @@ def load_data(data_dir: str | Path = DEFAULT_DATA_DIR) -> tuple[pd.DataFrame, pd
 #  2. PEER SELECTION
 # ═══════════════════════════════════════════════════════════════
 def select_peers(target_ticker, instruments_df, stocks_data_df,
-                 min_peer_history_days=120, min_peer_coverage=0.85,
-                 max_model_peers=25, include_cross_sector=False):
+                 min_peer_history_days=None, min_peer_coverage=None,
+                 max_model_peers=None, include_cross_sector=None):
+    if min_peer_history_days is None:
+        min_peer_history_days = _c("data", "min_peer_history_days", default=120)
+    if min_peer_coverage is None:
+        min_peer_coverage = _c("data", "min_peer_coverage", default=0.85)
+    if max_model_peers is None:
+        max_model_peers = _c("data", "max_model_peers", default=25)
+    if include_cross_sector is None:
+        include_cross_sector = _c("data", "include_cross_sector", default=False)
     meta = instruments_df.copy()
     meta["symbol"] = meta["symbol"].astype(str).str.upper()
     sector_lookup = meta.set_index("symbol")["sector"].to_dict()
@@ -374,9 +432,9 @@ def ml_proxy_reconstruction(ret_window, ret_full, prices_obs, gap_start, gap_end
 def ml_proxy_optimisation(ret_df, prices_df, dist_start, dist_end,
                           lookback_grid=None, thresh_grid=None, default_max_peers=DEFAULT_MAX_PEERS):
     if lookback_grid is None:
-        lookback_grid = LOOKBACK_GRID
+        lookback_grid = _c("sweep", "lookback_grid", default=LOOKBACK_GRID)
     if thresh_grid is None:
-        thresh_grid = THRESH_GRID
+        thresh_grid = _c("sweep", "threshold_grid", default=THRESH_GRID)
     sweep_true = prices_df[DIST_TRUE_KEY].iloc[dist_start:dist_end].values
     sweep_rows, best_rmse, best_params, best_series = [], np.inf, (None, None), None
     for lb in lookback_grid:
@@ -407,8 +465,12 @@ def ml_proxy_optimisation(ret_df, prices_df, dist_start, dist_end,
 
 
 def ml_proxy_enhanced_optimisation(ret_df, prices_df, dist_start, dist_end,
-                                   n_iter=50, random_state=42,
+                                   n_iter=None, random_state=None,
                                    default_max_peers=DEFAULT_MAX_PEERS):
+    if n_iter is None:
+        n_iter = _c("sweep", "n_iter_enhanced", default=50)
+    if random_state is None:
+        random_state = _c("sweep", "random_state", default=42)
     """Enhanced ML Proxy optimisation with random sampling, out-of-sample
     validation, enhanced metrics, and multi-objective composite scoring.
 
@@ -515,10 +577,16 @@ def elastic_net_proxy_reconstruction(
     prices_obs: pd.Series,
     gap_start: int,
     gap_end: int,
-    l1_ratio: float = 0.5,
-    use_cv: bool = True,
-    alpha: float = 1.0,
+    l1_ratio: float | None = None,
+    use_cv: bool | None = None,
+    alpha: float | None = None,
 ) -> tuple[pd.Series, dict]:
+    if l1_ratio is None:
+        l1_ratio = _c("models", "elastic_net", "l1_ratio", default=0.5)
+    if use_cv is None:
+        use_cv = _c("models", "elastic_net", "use_cv", default=True)
+    if alpha is None:
+        alpha = _c("models", "elastic_net", "alpha", default=1.0)
     """Reconstruct using Elastic Net for sparse peer selection.
 
     L1 penalty (Lasso) forces weak peer coefficients to exactly zero;
@@ -595,10 +663,14 @@ def gpr_reconstruction(
     prices_obs: pd.Series,
     gap_start: int,
     gap_end: int,
-    kernel_type: str = 'rbf',
-    n_restarts: int = 10,
+    kernel_type: str | None = None,
+    n_restarts: int | None = None,
     max_peers: int = DEFAULT_MAX_PEERS,
 ) -> tuple[pd.Series, dict]:
+    if kernel_type is None:
+        kernel_type = _c("models", "gpr", "kernel_type", default='rbf')
+    if n_restarts is None:
+        n_restarts = _c("models", "gpr", "n_restarts", default=10)
     """Reconstruct using Gaussian Process Regression (non-parametric).
 
     GPR is a non-parametric method that captures non-linear relationships
@@ -686,8 +758,10 @@ def kalman_time_varying_beta_reconstruction(
     gap_start: int,
     gap_end: int,
     max_peers: int = DEFAULT_MAX_PEERS,
-    process_noise: float = 1e-4,
+    process_noise: float | None = None,
 ) -> tuple[pd.Series, dict]:
+    if process_noise is None:
+        process_noise = _c("models", "kalman", "process_noise", default=1e-4)
     """Reconstruct using Kalman Filter for time-varying beta estimation.
 
     Instead of a static beta (OLS/Ridge), the Kalman Filter lets beta evolve
@@ -876,7 +950,11 @@ def apply_drift_corrections(best_method, best_series, prices_df, dist_start, dis
     return corrected, pd.DataFrame(rows).sort_values("RMSE").reset_index(drop=True)
 
 
-def cusum_drift_detection(errors, delta=0.2, threshold=5.0):
+def cusum_drift_detection(errors, delta=None, threshold=None):
+    if delta is None:
+        delta = _c("drift_correction", "cusum_delta", default=0.2)
+    if threshold is None:
+        threshold = _c("drift_correction", "cusum_threshold", default=5.0)
     """Detect drift onset using CUSUM (Cumulative Sum) control chart.
 
     Parameters
@@ -910,7 +988,9 @@ def cusum_drift_detection(errors, delta=0.2, threshold=5.0):
 
 
 def kalman_drift_correction(reconstructed, true, gap_start, gap_end,
-                            process_variance=1e-3, use_smoother=True):
+                            process_variance=None, use_smoother=True):
+    if process_variance is None:
+        process_variance = _c("drift_correction", "kalman_process_variance", default=1e-3)
     """Apply Kalman Filter to estimate and correct drift in reconstructed prices.
 
     Treats drift as a 1D latent state variable evolving as a random walk,
@@ -965,7 +1045,11 @@ def kalman_drift_correction(reconstructed, true, gap_start, gap_end,
 
 
 def drift_correction(reconstructed, true, gap_start, gap_end,
-                     method='kalman', process_variance=1e-3):
+                     method=None, process_variance=None):
+    if method is None:
+        method = _c("drift_correction", "method", default='kalman')
+    if process_variance is None:
+        process_variance = _c("drift_correction", "kalman_process_variance", default=1e-3)
     """Universal drift correction returning DataFrame with multiple corrections.
 
     Parameters
@@ -1005,7 +1089,11 @@ def drift_correction(reconstructed, true, gap_start, gap_end,
 # ═══════════════════════════════════════════════════════════════
 #  6. BACKTESTING
 # ═══════════════════════════════════════════════════════════════
-def backtest_mean_reversion(prices, lookback=5, threshold=0.01):
+def backtest_mean_reversion(prices, lookback=None, threshold=None):
+    if lookback is None:
+        lookback = _c("backtest", "mean_reversion_lookback", default=5)
+    if threshold is None:
+        threshold = _c("backtest", "mean_reversion_threshold", default=0.01)
     ma = prices.rolling(lookback).mean()
     pos = pd.Series(0, index=prices.index, dtype=float)
     buy, sell = prices < ma * (1 - threshold), prices > ma * (1 + threshold)
@@ -1064,302 +1152,522 @@ def _plot_comparison_grid(summary_df, recon, prices_df, dates, dist_start, dist_
     plt.close(fig)
 
 
-def _plot_overlay(summary_df, recon, prices_df, dates, dist_start, dist_end, out_dir):
-    """Reconstruction Method Comparison: overlay + RMSE bar."""
-    zs, ze = max(0, dist_start - 10), min(len(dates), dist_end + 10)
-    fig, axes = plt.subplots(1, 2, figsize=(18, 6))
-    colors = ["#1565C0", "#E65100", "#D32F2F", "#F57C00", "#6A1B9A", "#00897B", "#C62828"]
-    axes[0].plot(dates[zs:ze], prices_df[DIST_TRUE_KEY].iloc[zs:ze], "g--", lw=2.5, label="True", zorder=10)
-    axes[0].plot(dates[zs:ze], prices_df[DIST_OBS_KEY].iloc[zs:ze], "#F44336", lw=1, alpha=0.4, label="Observed")
-    axes[0].axvspan(dates[dist_start], dates[dist_end - 1], color="red", alpha=0.06)
-    for idx, (_, rw) in enumerate(summary_df.iterrows()):
-        axes[0].plot(dates[zs:ze], recon[rw["Method"]].iloc[zs:ze],
-                     color=colors[idx % len(colors)], lw=1.8, alpha=0.85, label=rw["Method"])
-    axes[0].set_title("All Methods vs True Reference", fontweight="bold")
-    axes[0].set_ylabel("Price"); axes[0].legend(fontsize=7, ncol=2, loc="upper left")
-    axes[0].xaxis.set_major_formatter(mdates.DateFormatter("%d %b"))
-    plt.setp(axes[0].xaxis.get_majorticklabels(), rotation=25); axes[0].grid(alpha=0.2)
 
-    xp = range(len(summary_df)); bw = 0.35
-    rmse_n = summary_df["RMSE"] / summary_df["RMSE"].max()
-    axes[1].bar([xi - bw / 2 for xi in xp], rmse_n.values, bw, color="#E53935", alpha=0.7, label="Norm RMSE")
-    ax2 = axes[1].twinx()
-    ax2.scatter([xi + bw / 2 for xi in xp], summary_df["Return Corr"].values, s=80,
-                c=summary_df["Return Corr"], cmap="RdYlGn", vmin=-1, vmax=1, edgecolor="black", zorder=5)
-    axes[1].set_xticks(list(xp)); axes[1].set_xticklabels(summary_df["Method"], rotation=35, ha="right", fontsize=9)
-    axes[1].set_title("RMSE (norm) vs Return Correlation", fontweight="bold")
-    axes[1].set_ylabel("Norm RMSE", color="#E53935"); ax2.set_ylabel("Return Corr", color="green")
-    axes[1].grid(axis="y", alpha=0.2)
-    fig.suptitle("Reconstruction Method Comparison", fontweight="bold", fontsize=14, y=1.02)
-    fig.tight_layout(); fig.savefig(out_dir / "plot_method_comparison.png", dpi=150, bbox_inches="tight")
-    plt.close(fig)
+def _plot_drift(drift_metrics, drift_df, drift_series_dict, best_method,
+                prices_df, dates, dist_start, dist_end, out_dir):
+    """Drift Detection & Correction chart (Section 5 style).
 
+    Three panels:
+      1. Cumulative drift error over the distress window.
+      2. CUSUM drift detection alarm signal.
+      3. True vs best-predicted vs best-corrected price overlay.
+    """
+    zs = max(0, dist_start - 5)
+    ze = min(len(dates), dist_end + 5)
+    dist_dates = dates[dist_start:dist_end]
 
-def _plot_drift(drift_df, drift_results, best_method, prices_df, dates, dist_start, dist_end, out_dir):
-    """Drift Detection & Correction chart."""
-    zs = slice(max(0, dist_start - 5), min(len(dates), dist_end + 5))
-    fig, axes = plt.subplots(2, 3, figsize=(20, 10))
+    # Find best correction
+    best_corr_series = None
+    best_corr_name = None
+    if drift_series_dict and len(drift_series_dict) > 1:
+        corr_names = [n for n in drift_series_dict if "(no correction)" not in n]
+        if corr_names:
+            best_rmse_c = np.inf
+            for n in corr_names:
+                p = drift_series_dict[n].iloc[dist_start:dist_end].values
+                t = prices_df[DIST_TRUE_KEY].iloc[dist_start:dist_end].values
+                rmse_c = float(np.sqrt(mean_squared_error(t, p)))
+                if rmse_c < best_rmse_c:
+                    best_rmse_c = rmse_c
+                    best_corr_name = n
+                    best_corr_series = drift_series_dict[n]
 
-    axes[0, 0].plot(drift_df.index, drift_df["price_error"], "o-", color="#D32F2F", lw=1.5, ms=3)
-    axes[0, 0].axhline(0, color="gray", lw=0.7, ls="--")
-    axes[0, 0].axhline(drift_df["price_error"].mean(), color="#D32F2F", ls=":", lw=1.5,
-                        label=f'Mean={drift_df["price_error"].mean():.3f}')
-    axes[0, 0].set_title("Daily Price Error", fontweight="bold"); axes[0, 0].legend(fontsize=8)
+    fig, axes = plt.subplots(1, 3, figsize=(20, 6))
 
-    axes[0, 1].fill_between(drift_df.index, 0, drift_df["cum_error"], color="#D32F2F", alpha=0.3)
-    axes[0, 1].plot(drift_df.index, drift_df["cum_error"], color="#D32F2F", lw=2)
-    axes[0, 1].axhline(0, color="gray", lw=0.7, ls="--")
-    axes[0, 1].set_title("Cumulative Prediction Error (Drift)", fontweight="bold")
-
-    axes[0, 2].plot(drift_df.index, drift_df["tracking_error"], "s-", color="#6A1B9A", lw=1.5, ms=3)
-    axes[0, 2].set_title("Tracking Error", fontweight="bold")
-
-    drift_corrected = {f"{best_method} (no correction)": prices_df["DIST_OBS"].copy()}
-    drift_corrected[f"{best_method} (no correction)"] = \
-        [s for _, s in [(n, None) for n in range(1)]][0]  # placeholder
-    # Use actual drift corrections
-    dc = {r["Method"]: r for _, r in drift_results.iterrows()}
-    method_names = list(dc.keys())[:4]
-    from gap_filling import correct_drift_residual_bias, correct_drift_rolling_bias, correct_drift_error_feedback
-    # Actually let's just plot from the drift_results we already computed
-    for ax, (name, series) in zip(axes[1], drift_results.iterrows()):
-        if len(axes[1].flatten()) > 4:
-            break
-    # Simpler: just plot the best series from the drift_results
-    # Reconstruct for plotting
-    best_orig = prices_df["DIST_OBS"].copy()
-    # This is getting complex; let's just use what we have from run_pipeline's drift_corrected_series
-    axes[1, 0].text(0.5, 0.5, "See drift_results.csv\nfor detailed metrics",
-                    transform=axes[1, 0].transAxes, ha="center", va="center", fontsize=12)
-    axes[1, 1].axis("off"); axes[1, 2].axis("off")
-
-    fig.suptitle("Drift Detection & Correction", fontweight="bold", fontsize=14, y=1.02)
-    fig.tight_layout(); fig.savefig(out_dir / "plot_drift.png", dpi=150, bbox_inches="tight")
-    plt.close(fig)
-
-
-def _plot_actual_vs_predicted(summary_df, recon, prices_df, dates, dist_start, dist_end, out_dir):
-    """Actual vs Predicted Prices: compares best method reconstruction vs true prices,
-    plus error distribution. Saved as plot_actual_vs_predicted.png."""
-    zs, ze = max(0, dist_start - 10), min(len(dates), dist_end + 10)
-    best_name = summary_df.iloc[0]["Method"]
-    best_series = recon[best_name]
-    true = prices_df[DIST_TRUE_KEY].iloc[dist_start:dist_end].values
-    pred = best_series.iloc[dist_start:dist_end].values
-    errors = pred - true
-
-    fig, axes = plt.subplots(2, 2, figsize=(16, 10))
-
-    # Panel A: Time series overlay (best method)
-    ax = axes[0, 0]
-    ax.plot(dates[zs:ze], prices_df[DIST_TRUE_KEY].iloc[zs:ze], "g--", lw=2.5, label="True", zorder=10)
-    ax.plot(dates[zs:ze], prices_df[DIST_OBS_KEY].iloc[zs:ze], "#F44336", lw=1, alpha=0.35, label="Observed")
-    ax.plot(dates[zs:ze], best_series.iloc[zs:ze], "#1565C0", lw=2.5, label=f"Best: {best_name}")
-    ax.axvspan(dates[dist_start], dates[dist_end - 1], color="red", alpha=0.07)
-    ax.set_title(f"Actual vs Predicted — {best_name}", fontweight="bold")
-    ax.set_ylabel("Price ($)"); ax.legend(fontsize=9)
+    # Panel 1: Cumulative drift error
+    ax = axes[0]
+    ax.plot(dist_dates, drift_metrics["cum_error"].values, color="#D32F2F", lw=2, marker="o", ms=3)
+    ax.fill_between(dist_dates, 0, drift_metrics["cum_error"].values, color="#D32F2F", alpha=0.15)
+    ax.axhline(0, color="gray", lw=0.7, ls="--")
+    final_drift = drift_metrics["cum_error"].iloc[-1]
+    ax.text(0.05, 0.92, f"Final drift: ${final_drift:.2f}", transform=ax.transAxes,
+            fontsize=10, bbox=dict(boxstyle="round", facecolor="white", alpha=0.8))
+    ax.set_title("Cumulative Prediction Error (Drift)", fontweight="bold")
+    ax.set_ylabel("Cumulative Error ($)")
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%d %b"))
-    plt.setp(ax.xaxis.get_majorticklabels(), rotation=25); ax.grid(alpha=0.2)
+    plt.setp(ax.xaxis.get_majorticklabels(), rotation=25)
+    ax.grid(alpha=0.2)
 
-    # Panel B: Scatter plot actual vs predicted
-    ax = axes[0, 1]
-    ax.scatter(true, pred, alpha=0.6, s=40, c="#1565C0", edgecolors="black", linewidth=0.5)
-    min_val = min(true.min(), pred.min())
-    max_val = max(true.max(), pred.max())
-    ax.plot([min_val, max_val], [min_val, max_val], "r--", lw=2, label="Perfect fit")
-    ax.set_xlabel("Actual Price ($)", fontweight="bold")
-    ax.set_ylabel("Predicted Price ($)", fontweight="bold")
-    ax.set_title("Actual vs Predicted (Scatter)", fontweight="bold")
-    r2_val = 1 - np.sum((true - pred) ** 2) / np.sum((true - true.mean()) ** 2)
-    ax.text(0.05, 0.95, f"R² = {r2_val:.3f}", transform=ax.transAxes, fontsize=10,
-            bbox=dict(boxstyle="round", facecolor="white", alpha=0.8))
-    ax.legend(fontsize=9); ax.grid(alpha=0.3)
-    ax.set_xlim(min_val, max_val); ax.set_ylim(min_val, max_val)
+    # Panel 2: CUSUM drift detection
+    ax = axes[1]
+    cusum_result = cusum_drift_detection(drift_metrics["price_error"].values)
+    ax.plot(dist_dates, cusum_result["cusum"], color="#6A1B9A", lw=2)
+    ax.axhline(5.0, color="#D32F2F", ls="--", lw=1.5, alpha=0.7, label="Alarm threshold (5.0)")
+    if cusum_result["drift_detected"]:
+        alarm_date = dist_dates[cusum_result["drift_start_day"]]
+        ax.axvline(alarm_date, color="#E65100", ls=":", lw=2, alpha=0.8,
+                   label=f"Drift onset @ {alarm_date.strftime('%d %b')}")
+    ax.set_title("CUSUM Drift Detection", fontweight="bold")
+    ax.set_ylabel("CUSUM Statistic"); ax.legend(fontsize=8)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%d %b"))
+    plt.setp(ax.xaxis.get_majorticklabels(), rotation=25)
+    ax.grid(alpha=0.2)
 
-    # Panel C: Error histogram
-    ax = axes[1, 0]
-    ax.hist(errors, bins=15, color="steelblue", alpha=0.7, edgecolor="black", linewidth=0.5)
-    ax.axvline(0, color="red", ls="--", lw=2, label=f"Mean Error = {np.mean(errors):.3f}")
-    ax.set_xlabel("Prediction Error ($)", fontweight="bold")
-    ax.set_ylabel("Frequency", fontweight="bold")
-    ax.set_title(f"Error Distribution (RMSE={summary_df.iloc[0]['RMSE']:.3f})", fontweight="bold")
-    ax.legend(fontsize=9); ax.grid(alpha=0.3)
+    # Panel 3: True vs Predicted vs Corrected
+    ax = axes[2]
+    pred_series = drift_series_dict.get(
+        next((k for k in drift_series_dict if "(no correction)" in k), None),
+        prices_df[DIST_OBS_KEY])
+    ax.plot(dates[zs:ze], prices_df[DIST_TRUE_KEY].iloc[zs:ze], "g-", lw=2.5,
+            label="True", zorder=10)
+    if best_corr_series is not None:
+        ax.plot(dates[zs:ze], best_corr_series.iloc[zs:ze], "#1565C0", lw=2.2, ls="--",
+                label=f"Best correction: {best_corr_name}")
+    ax.plot(dates[zs:ze], prices_df[DIST_OBS_KEY].iloc[zs:ze], "#F44336", lw=1, alpha=0.35,
+            label="Observed (corrupted)")
+    ax.axvspan(dates[dist_start], dates[dist_end - 1], color="red", alpha=0.07)
+    ax.set_title("Drift Correction — True vs Best Corrected", fontweight="bold")
+    ax.set_ylabel("Price ($)"); ax.legend(fontsize=7.5)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%d %b"))
+    plt.setp(ax.xaxis.get_majorticklabels(), rotation=25)
+    ax.grid(alpha=0.2)
 
-    # Panel D: QQ-like comparison of percentiles
-    ax = axes[1, 1]
-    sorted_true = np.sort(true)
-    sorted_pred = np.sort(pred)
-    percentiles = np.linspace(0, 100, len(true))
-    ax.plot(sorted_true, sorted_pred, "o-", color="#1565C0", ms=3, lw=1.5, alpha=0.7)
-    ax.plot([min_val, max_val], [min_val, max_val], "r--", lw=2, label="Perfect fit")
-    ax.set_xlabel("Actual Price Percentile ($)", fontweight="bold")
-    ax.set_ylabel("Predicted Price Percentile ($)", fontweight="bold")
-    ax.set_title("Price Percentile Comparison", fontweight="bold")
-    ax.legend(fontsize=9); ax.grid(alpha=0.3)
-
-    fig.suptitle("Actual vs Predicted Prices", fontweight="bold", fontsize=14, y=1.02)
+    fig.suptitle("Section 5 — Drift Detection & Correction", fontweight="bold", fontsize=14, y=1.02)
     fig.tight_layout()
-    fig.savefig(out_dir / "plot_actual_vs_predicted.png", dpi=150, bbox_inches="tight")
+    fig.savefig(out_dir / "plot_drift.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
+
 
 
 def _plot_best_method(summary_df, recon, prices_df, dates, dist_start, dist_end, out_dir):
-    """Highlight the best prediction method with overlay of top-3 methods
-    and a metric comparison bar chart. Saved as plot_best_method.png."""
+    """Highlight Best Performers: top-5 overlay, metric bar chart, and RMSE/RetCorr scatter.
+
+    Saved as ``plot_best_method.png``.  Only advanced methods are shown
+    (simple fills are excluded upstream).
+    """
     zs, ze = max(0, dist_start - 10), min(len(dates), dist_end + 10)
-    top3 = summary_df.head(3)
+    top_k = min(5, len(summary_df))
+    top = summary_df.head(top_k)
 
-    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+    fig, axes = plt.subplots(1, 3, figsize=(20, 6.5))
+    colors_palette = ["#1565C0", "#E65100", "#2E7D32", "#6A1B9A", "#00897B"]
 
-    # Panel A: Top-3 method overlay
+    # ── Panel A: Top-5 method overlay ──
     ax = axes[0]
-    colors = ["#1565C0", "#E65100", "#2E7D32"]
     ax.plot(dates[zs:ze], prices_df[DIST_TRUE_KEY].iloc[zs:ze], "g--", lw=2.5, label="True", zorder=10)
-    ax.plot(dates[zs:ze], prices_df[DIST_OBS_KEY].iloc[zs:ze], "#F44336", lw=1, alpha=0.35, label="Observed")
-    for idx, (_, row) in enumerate(top3.iterrows()):
-        ax.plot(dates[zs:ze], recon[row["Method"]].iloc[zs:ze], color=colors[idx],
-                lw=2.2, label=f"#{idx+1} {row['Method']}")
+    ax.plot(dates[zs:ze], prices_df[DIST_OBS_KEY].iloc[zs:ze], "#F44336", lw=0.8, alpha=0.3, label="Observed")
+    for idx, (_, row) in enumerate(top.iterrows()):
+        ax.plot(dates[zs:ze], recon[row["Method"]].iloc[zs:ze],
+                color=colors_palette[idx], lw=2.0,
+                label=f"#{idx+1} {row['Method']}  [RMSE={row['RMSE']:.2f}]")
     ax.axvspan(dates[dist_start], dates[dist_end - 1], color="red", alpha=0.07)
-    ax.set_title("Top-3 Methods vs True", fontweight="bold")
-    ax.set_ylabel("Price ($)"); ax.legend(fontsize=8)
+    ax.set_title("Top Performers vs True Reference", fontweight="bold")
+    ax.set_ylabel("Price ($)")
+    ax.legend(fontsize=7, ncol=1, loc="upper left")
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%d %b"))
-    plt.setp(ax.xaxis.get_majorticklabels(), rotation=25); ax.grid(alpha=0.2)
+    plt.setp(ax.xaxis.get_majorticklabels(), rotation=25)
+    ax.grid(alpha=0.2)
 
-    # Panel B: Metric bar chart (RMSE, MAE, Final Gap)
+    # ── Panel B: Grouped bar chart — RMSE, MAE, Final Gap ──
     ax = axes[1]
-    x = range(len(top3))
+    x = range(len(top))
     w = 0.25
-    rmse = top3["RMSE"].values
-    mae = top3["MAE"].values
-    gap = top3["Final Gap"].values.abs() if "Final Gap" in top3.columns else np.zeros(len(top3))
+    rmse = top["RMSE"].values
+    mae = top["MAE"].values
+    final_gap = np.abs(top["Final Gap"].values) if "Final Gap" in top.columns else np.zeros(len(top))
     ax.bar([xi - w for xi in x], rmse, w, color="#E53935", alpha=0.8, label="RMSE")
     ax.bar(x, mae, w, color="#FB8C00", alpha=0.8, label="MAE")
-    ax.bar([xi + w for xi in x], gap, w, color="#1565C0", alpha=0.8, label="|Final Gap|")
+    ax.bar([xi + w for xi in x], final_gap, w, color="#1565C0", alpha=0.8, label="|Final Gap|")
     ax.set_xticks(list(x))
-    ax.set_xticklabels([f"#{i+1}" for i in range(len(top3))])
-    ax.set_title("Metric Comparison (Top-3)", fontweight="bold")
-    ax.set_ylabel("Error ($)"); ax.legend(fontsize=8); ax.grid(axis="y", alpha=0.3)
+    ax.set_xticklabels([f"#{i+1}" for i in range(len(top))], fontsize=9)
+    for i in range(len(top)):
+        ax.text(i, rmse[i] + 0.5, f"{rmse[i]:.2f}", ha="center", fontsize=7.5, color="#E53935", fontweight="bold")
+    ax.set_title("Metric Comparison (Top-5)", fontweight="bold")
+    ax.set_ylabel("Error ($)")
+    ax.legend(fontsize=8)
+    ax.grid(axis="y", alpha=0.3)
 
-    # Panel C: Return correlation vs RMSE (top-3 sized bubbles)
+    # ── Panel C: Scatter — RMSE vs Return Correlation (bubble = inverse rank) ──
     ax = axes[2]
-    sizes = [200 * (len(summary_df) - i) / len(summary_df) for i in range(3)]
-    scatter = ax.scatter(top3["RMSE"], top3["Return Corr"], s=sizes,
-                         c=colors[:3], alpha=0.7, edgecolors="black", linewidth=1)
-    for idx, (_, row) in enumerate(top3.iterrows()):
+    sizes = [250 * (top_k - i) / top_k for i in range(top_k)]
+    scatter = ax.scatter(top["RMSE"], top["Return Corr"], s=sizes,
+                         c=colors_palette[:top_k], alpha=0.75, edgecolors="black", linewidth=1, zorder=5)
+    for idx, (_, row) in enumerate(top.iterrows()):
         ax.annotate(f"#{idx+1}", (row["RMSE"], row["Return Corr"]),
-                    textcoords="offset points", xytext=(5, 5), fontsize=9, fontweight="bold")
-    ax.set_xlabel("RMSE", fontweight="bold")
-    ax.set_ylabel("Return Correlation", fontweight="bold")
-    ax.set_title("Error-Return Trade-off (Top-3)", fontweight="bold")
+                    textcoords="offset points", xytext=(6, 6), fontsize=9, fontweight="bold")
+    ax.set_xlabel("RMSE ↓", fontweight="bold")
+    ax.set_ylabel("Return Correlation ↑", fontweight="bold")
+    ax.set_title("Error-Return Trade-off", fontweight="bold")
     ax.axhline(0, color="gray", ls="--", alpha=0.3)
     ax.grid(alpha=0.3)
 
-    best_name = summary_df.iloc[0]["Method"]
-    fig.suptitle(f"Best Prediction Method: {best_name}", fontweight="bold", fontsize=14, y=1.02)
-    fig.tight_layout()
+    # ── Annotations box with key facts ──
+    best = summary_df.iloc[0]
+    facts = (
+        f"🏆 Best: {best['Method']}\n"
+        f"   RMSE = {best['RMSE']:.4f}   MAE = {best['MAE']:.4f}\n"
+        f"   Ret Corr = {best['Return Corr']:.4f}   Vol Ratio = {best['Vol Ratio']:.3f}"
+    )
+    fig.text(0.5, 0.01, facts, ha="center", fontsize=10,
+             bbox=dict(boxstyle="round,pad=0.5", facecolor="#FFF9C4", alpha=0.9, edgecolor="#F57F17"))
+
+    fig.suptitle("Highlight Best Performers", fontweight="bold", fontsize=14, y=1.02)
+    fig.tight_layout(rect=[0, 0.07, 1, 0.97])
     fig.savefig(out_dir / "plot_best_method.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
 
 
-def _plot_three_way_comparison(summary_df, recon, drift_corrected_dict, prices_df, dates,
-                               dist_start, dist_end, out_dir):
-    """3-Way Comparison: True vs Predicted vs Corrected.
-    Shows the original reconstruction, the best correction, and the true
-    price side by side. Saved as plot_three_way_comparison.png."""
-    zs, ze = max(0, dist_start - 10), min(len(dates), dist_end + 10)
-    best_name = summary_df.iloc[0]["Method"]
-    best_series = recon[best_name]
 
-    # Find the best correction (lowest RMSE)
-    if drift_corrected_dict and len(drift_corrected_dict) > 1:
-        corrected_names = [n for n in drift_corrected_dict if "(no correction)" not in n]
-        if corrected_names:
-            best_corr_name = corrected_names[0]
-            best_corr_series = drift_corrected_dict[best_corr_name]
-            # Actually find best by checking RMSE
-            best_rmse_corr = np.inf
-            for n in corrected_names:
-                p = drift_corrected_dict[n].iloc[dist_start:dist_end].values
-                t = prices_df[DIST_TRUE_KEY].iloc[dist_start:dist_end].values
-                rmse = float(np.sqrt(mean_squared_error(t, p)))
-                if rmse < best_rmse_corr:
-                    best_rmse_corr = rmse
-                    best_corr_name = n
-                    best_corr_series = drift_corrected_dict[n]
-        else:
-            best_corr_series = best_series
-            best_corr_name = "No correction available"
+# ═══════════════════════════════════════════════════════════════
+#  8. SECTION 6 — PROPOSED IMPROVEMENTS
+# ═══════════════════════════════════════════════════════════════
+
+def ensemble_top3_reconstruction(
+    recon: dict[str, pd.Series],
+    summary_df: pd.DataFrame,
+    prices_obs: pd.Series,
+    prices_true: pd.Series,
+    gap_start: int,
+    gap_end: int,
+    top_n: int = 3,
+    method: str = "mean",
+) -> dict:
+    """Ensemble the top *top_n* reconstruction methods from *summary_df*.
+
+    Parameters
+    ----------
+    recon : dict of {str: pd.Series}
+        Dictionary of reconstruction series.
+    summary_df : pd.DataFrame
+        Evaluation table sorted by RMSE (best first). Must have 'Method' column.
+    prices_obs : pd.Series
+        Observed (corrupted) price series.
+    prices_true : pd.Series
+        True (uncorrupted) price series for RMSE evaluation.
+    gap_start, gap_end : int
+        Distress window indices.
+    top_n : int
+        Number of top methods to ensemble (default 3).
+    method : str
+        ``"mean"``, ``"median"``, or ``"rmse_weighted"``.
+
+    Returns
+    -------
+    dict with keys 'predicted', 'members', 'weights', 'rmse'.
+    """
+    top_methods = summary_df.head(top_n)["Method"].tolist()
+    top_methods = [m for m in top_methods if m in recon]
+    if len(top_methods) < 2:
+        return {"predicted": recon[top_methods[0]], "members": top_methods,
+                "weights": [1.0], "rmse": float(summary_df.iloc[0]["RMSE"])}
+
+    members_arr = np.array([recon[m].iloc[gap_start:gap_end].values for m in top_methods])
+
+    if method == "mean":
+        weights = np.ones(len(top_methods)) / len(top_methods)
+        ensemble = np.mean(members_arr, axis=0)
+    elif method == "median":
+        weights = np.ones(len(top_methods)) / len(top_methods)
+        ensemble = np.median(members_arr, axis=0)
+    elif method == "rmse_weighted":
+        rmse_vals = summary_df.set_index("Method").loc[top_methods, "RMSE"].values + 1e-10
+        w = 1.0 / rmse_vals
+        weights = w / w.sum()
+        ensemble = np.average(members_arr, axis=0, weights=weights)
     else:
-        best_corr_series = best_series
-        best_corr_name = "No correction available"
+        raise ValueError(f"Unknown ensemble method: {method}")
 
-    true_vals = prices_df[DIST_TRUE_KEY].iloc[zs:ze].values
-    pred_vals = best_series.iloc[zs:ze].values
-    corr_vals = best_corr_series.iloc[zs:ze].values
-    pred_err = np.abs(pred_vals - true_vals).mean()
-    corr_err = np.abs(corr_vals - true_vals).mean()
+    predicted = prices_obs.copy()
+    predicted.iloc[gap_start:gap_end] = ensemble
+    rmse_val = np.sqrt(mean_squared_error(
+        prices_true.iloc[gap_start:gap_end].values, ensemble))
+    return {"predicted": predicted, "members": top_methods,
+            "weights": weights.tolist() if hasattr(weights, "tolist") else list(weights),
+            "rmse": float(rmse_val)}
 
-    fig, axes = plt.subplots(1, 3, figsize=(20, 6))
 
-    # Panel A: 3-way overlay
+def tune_hyperparameters_cv(
+    ret_full: pd.DataFrame,
+    prices_obs: pd.Series,
+    true_prices: pd.Series,
+    gap_start: int,
+    gap_end: int,
+    lookback_grid: list[int] | None = None,
+    threshold_grid: list[float] | None = None,
+    peer_grid: list[int] | None = None,
+    cv_splits: int = 3,
+) -> pd.DataFrame:
+    """Tune ML proxy hyperparameters using time-series cross-validation.
+
+    Uses the distress window as the test set, evaluating parameter
+    combinations via TimeSeriesSplit on pre-distress data.
+
+    Parameters
+    ----------
+    ret_full : pd.DataFrame
+        Full return panel (must have 'DIST' column).
+    prices_obs : pd.Series
+        Observed (corrupted) prices.
+    true_prices : pd.Series
+        True (uncorrupted) prices.
+    gap_start, gap_end : int
+        Distress window indices.
+    lookback_grid, threshold_grid, peer_grid : lists, optional
+        Parameter grids.
+    cv_splits : int
+        Number of time-series CV folds (default 3).
+
+    Returns
+    -------
+    pd.DataFrame sorted by CV RMSE (best first).
+    """
+    if lookback_grid is None:
+        lookback_grid = _c("sweep", "lookback_grid", default=[40, 60, 80, 120])
+    if threshold_grid is None:
+        threshold_grid = _c("sweep", "threshold_grid", default=[0.25, 0.35, 0.45, 0.55])
+    if peer_grid is None:
+        peer_grid = [3, 5, 7]
+
+    pre_start = max(0, gap_start - max(lookback_grid) - 10)
+    pre_window = ret_full.iloc[pre_start:gap_start]
+    rows = []
+
+    import itertools
+    for lb, thr, mp in itertools.product(lookback_grid, threshold_grid, peer_grid):
+        if len(pre_window) < 2 * lb:
+            continue
+
+        tscv = TimeSeriesSplit(n_splits=cv_splits)
+        cv_rmse = []
+
+        for train_idx, val_idx in tscv.split(pre_window):
+            train_win = pre_window.iloc[train_idx]
+            val_win = pre_window.iloc[val_idx]
+            if len(train_win) < lb or len(val_win) < 5:
+                continue
+
+            try:
+                dist_mat = feature_distance_matrix(train_win, use_pca=False)
+                linkage_mat = linkage(squareform(dist_mat.values), method="ward")
+                labels = fcluster(linkage_mat, t=thr, criterion="distance")
+                stocks = dist_mat.columns.tolist()
+                clust_id = labels[stocks.index("DIST")]
+                same_cluster = [s for s, cid in zip(stocks, labels)
+                                if cid == clust_id and s != "DIST"]
+                corr_mat = train_win.corr()
+                raw_corr = corr_mat.loc["DIST"].drop("DIST")
+                peers = (sorted(same_cluster, key=lambda s: abs(raw_corr[s]), reverse=True)[:mp]
+                         if same_cluster else raw_corr.abs().sort_values(ascending=False).index[:mp].tolist())
+                peer_cols = [c for c in peers if c in train_win.columns]
+                if len(peer_cols) < 2:
+                    continue
+
+                model = LinearRegression().fit(train_win[peer_cols].values, train_win["DIST"].values)
+                y_pred = model.predict(val_win[peer_cols].values)
+                cv_rmse.append(np.sqrt(mean_squared_error(val_win["DIST"].values, y_pred)))
+            except Exception:
+                continue
+
+        if not cv_rmse:
+            continue
+
+        # Train on full pre-window and test on distress
+        try:
+            dist_mat = feature_distance_matrix(pre_window, use_pca=False)
+            linkage_mat = linkage(squareform(dist_mat.values), method="ward")
+            labels = fcluster(linkage_mat, t=thr, criterion="distance")
+            stocks = dist_mat.columns.tolist()
+            clust_id = labels[stocks.index("DIST")]
+            same_cluster = [s for s, cid in zip(stocks, labels) if cid == clust_id and s != "DIST"]
+            corr_mat = pre_window.corr()
+            raw_corr = corr_mat.loc["DIST"].drop("DIST")
+            peers = (sorted(same_cluster, key=lambda s: abs(raw_corr[s]), reverse=True)[:mp]
+                     if same_cluster else raw_corr.abs().sort_values(ascending=False).index[:mp].tolist())
+            peer_cols = [c for c in peers if c in pre_window.columns]
+            if len(peer_cols) < 2:
+                continue
+
+            model = LinearRegression().fit(pre_window[peer_cols].values, pre_window["DIST"].values)
+            gap_ret = ret_full[peer_cols].iloc[gap_start:gap_end].values
+            pred_log_ret = model.predict(gap_ret)
+            reconstructed = prices_obs.copy()
+            for i in range(gap_end - gap_start):
+                reconstructed.iloc[gap_start + i] = reconstructed.iloc[gap_start + i - 1] * np.exp(pred_log_ret[i])
+
+            true_seg = true_prices.iloc[gap_start:gap_end].values
+            pred_seg = reconstructed.iloc[gap_start:gap_end].values
+            test_rmse = float(np.sqrt(mean_squared_error(true_seg, pred_seg)))
+            ret_corr = float(np.corrcoef(
+                np.log(pred_seg / reconstructed.iloc[gap_start - 1:gap_end - 1].values),
+                np.log(true_seg / true_prices.iloc[gap_start - 1:gap_end - 1].values)
+            )[0, 1])
+        except Exception:
+            continue
+
+        rows.append({"lookback": lb, "threshold": thr, "max_peers": mp,
+                      "n_peers_used": len(peer_cols),
+                      "cv_rmse_mean": float(np.mean(cv_rmse)),
+                      "cv_rmse_std": float(np.std(cv_rmse)),
+                      "test_rmse": test_rmse, "ret_corr": ret_corr})
+
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows).sort_values("cv_rmse_mean").reset_index(drop=True)
+
+
+def auto_select_method(
+    prices_obs: pd.Series,
+    ret_full: pd.DataFrame,
+    gap_start: int,
+    gap_end: int,
+    recon: dict[str, pd.Series],
+    summary_df: pd.DataFrame | None = None,
+) -> dict:
+    """Automatically select the best reconstruction method based on distress characteristics.
+
+    Analyses volatility ratio, drift persistence, and window length,
+    then applies a rule-based scoring system.
+
+    Returns
+    -------
+    dict with keys: recommended_method, distress_stats, rationale, scores.
+    """
+    from collections import Counter
+    pre_ret = ret_full["DIST"].iloc[max(0, gap_start - 60):gap_start]
+    during_ret = ret_full["DIST"].iloc[gap_start:gap_end]
+    pre_vol = pre_ret.std()
+    during_vol = during_ret.std()
+    vol_ratio = during_vol / pre_vol if pre_vol > 0 else 1.0
+
+    window_length = gap_end - gap_start
+    is_long_window = window_length >= 20
+
+    obs_prices = prices_obs.iloc[gap_start:gap_end].values
+    half = len(obs_prices) // 2
+    if half > 1:
+        fh = np.mean(obs_prices[:half] - obs_prices[0])
+        sh = np.mean(obs_prices[half:] - obs_prices[0])
+        has_persistent_drift = abs(sh - fh) > 0.05 * obs_prices[0]
+    else:
+        has_persistent_drift = False
+
+    scores = Counter()
+    if vol_ratio > 1.5:
+        scores["GP-RBF"] += 2; scores["Elastic Net+CV"] += 1; scores["ML Stable+OLS"] += 1
+    elif vol_ratio < 0.7:
+        scores["Static Proxy+OLS"] += 1; scores["Static Proxy+Ridge"] += 1
+    else:
+        scores["Kalman Beta"] += 1; scores["Static Proxy+OLS"] += 1
+
+    if is_long_window:
+        scores["Kalman Beta"] += 2; scores["GP-RBF"] += 2
+        scores["Dynamic Proxy+OLS"] += 1; scores["Coint Proxy: Coint VRW"] += 1
+    else:
+        scores["Static Proxy+OLS"] += 2; scores["Elastic Net+CV"] += 1
+
+    if has_persistent_drift:
+        scores["Coint Proxy: Coint VRW"] += 2; scores["Coint Proxy: Coint EW"] += 1
+        scores["Elastic Net+CV"] += 1
+    else:
+        scores["Feature Raw Proxy+OLS"] += 1; scores["ML Proxy+Opt (Best Sweep)"] += 1
+
+    available = set(recon.keys())
+    valid_scores = {k: v for k, v in scores.items() if k in available}
+    recommended = max(valid_scores, key=valid_scores.get) if valid_scores else list(available)[0]
+    best_from_data = summary_df.iloc[0]["Method"] if summary_df is not None and not summary_df.empty else None
+
+    distress_stats = {"window_length": window_length, "is_long_window": is_long_window,
+                      "vol_ratio": float(vol_ratio), "has_persistent_drift": has_persistent_drift,
+                      "pre_vol": float(pre_vol), "during_vol": float(during_vol)}
+    rationale_parts = [f"window={window_length}d {'(long)' if is_long_window else '(short)'}",
+                       f"vol_ratio={vol_ratio:.2f} {'(spiking)' if vol_ratio > 1.5 else '(stable)'}"]
+    if has_persistent_drift:
+        rationale_parts.append("persistent drift detected")
+
+    return {"recommended_method": recommended, "distress_stats": distress_stats,
+            "rationale": "; ".join(rationale_parts), "best_from_evaluation": best_from_data,
+            "scores": dict(valid_scores)}
+
+
+def _plot_improvements(compare_df, recon, prices_df, dates, dist_start, dist_end, out_dir):
+    """Section 6 — Proposed Improvements: ensemble, CV tuning comparison graph.
+
+    Two panels: price overlay of improvements vs true, and RMSE bar chart.
+    Saved as ``plot_improvements.png``.
+    """
+    zs, ze = max(0, dist_start - 15), min(len(dates), dist_end + 15)
+    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+    colors_imp = ["#1565C0", "#E65100", "#2E7D32", "#6A1B9A", "#00897B"]
+
+    # Panel A: Price reconstruction overlay
     ax = axes[0]
-    ax.plot(dates[zs:ze], prices_df[DIST_TRUE_KEY].iloc[zs:ze], "g-", lw=2.5, label="True (Original)", zorder=10)
-    ax.plot(dates[zs:ze], best_series.iloc[zs:ze], "#F44336", lw=2, alpha=0.7, label=f"Predicted ({best_name})")
-    ax.plot(dates[zs:ze], best_corr_series.iloc[zs:ze], "#1565C0", lw=2.2, ls="--",
-            label=f"Corrected ({best_corr_name})")
+    ax.plot(dates[zs:ze], prices_df[DIST_TRUE_KEY].iloc[zs:ze], "g--", lw=2.5, label="True", zorder=10)
+    ax.plot(dates[zs:ze], prices_df[DIST_OBS_KEY].iloc[zs:ze], "#F44336", lw=1, alpha=0.35, label="Observed")
+    for idx, (_, r) in enumerate(compare_df.iterrows()):
+        if r["Method"] not in recon:
+            continue
+        ax.plot(dates[zs:ze], recon[r["Method"]].iloc[zs:ze], color=colors_imp[idx % len(colors_imp)],
+                lw=2, label=f"{r['Method']} (RMSE={r['RMSE']:.3f})")
     ax.axvspan(dates[dist_start], dates[dist_end - 1], color="red", alpha=0.07)
-    ax.set_title("3-Way: True vs Predicted vs Corrected", fontweight="bold")
-    ax.set_ylabel("Price ($)"); ax.legend(fontsize=8)
+    ax.set_title("Panel A — Improvement Methods vs True Prices", fontweight="bold")
+    ax.set_ylabel("Price ($)"); ax.legend(fontsize=7, loc="upper left")
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%d %b"))
     plt.setp(ax.xaxis.get_majorticklabels(), rotation=25); ax.grid(alpha=0.2)
 
-    # Panel B: Error reduction bar chart
+    # Panel B: RMSE bar chart
     ax = axes[1]
-    labels = ["Predicted", "Corrected"]
-    values = [pred_err, corr_err]
-    colors_bars = ["#F44336", "#1565C0"]
-    bars = ax.bar(labels, values, color=colors_bars, alpha=0.8, edgecolor="black", linewidth=1.2)
-    for bar, val in zip(bars, values):
-        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.02,
-                f"${val:.2f}", ha="center", fontweight="bold", fontsize=11)
-    ax.set_title("Mean Absolute Error Reduction", fontweight="bold")
-    ax.set_ylabel("MAE ($)"); ax.grid(axis="y", alpha=0.3)
-    if corr_err < pred_err:
-        pct = (pred_err - corr_err) / pred_err * 100
-        ax.text(0.5, 0.9, f"↓ {pct:.1f}% improvement", transform=ax.transAxes,
-                ha="center", fontsize=12, fontweight="bold", color="#1565C0",
-                bbox=dict(boxstyle="round", facecolor="#E3F2FD", alpha=0.8))
+    x_pos = range(len(compare_df))
+    bar_colors = [colors_imp[i % len(colors_imp)] for i in range(len(compare_df))]
+    bars = ax.bar(x_pos, compare_df["RMSE"].values, color=bar_colors, edgecolor="white", width=0.6)
+    ax.set_xticks(list(x_pos))
+    short_names = [m[:25] + "..." if len(m) > 25 else m for m in compare_df["Method"]]
+    ax.set_xticklabels(short_names, rotation=35, ha="right", fontsize=8)
+    ax.set_title("Panel B — RMSE Comparison", fontweight="bold")
+    ax.set_ylabel("RMSE"); ax.grid(axis="y", alpha=0.2)
+    for i, (_, r) in enumerate(compare_df.iterrows()):
+        ax.text(i, r["RMSE"] + 0.02, f'{r["RMSE"]:.3f}', ha="center", fontsize=8, fontweight="bold")
 
-    # Panel C: Daily error comparison (predicted vs corrected)
-    ax = axes[2]
-    dist_dates = dates[dist_start:dist_end]
-    pred_daily_err = best_series.iloc[dist_start:dist_end].values - prices_df[DIST_TRUE_KEY].iloc[dist_start:dist_end].values
-    corr_daily_err = best_corr_series.iloc[dist_start:dist_end].values - prices_df[DIST_TRUE_KEY].iloc[dist_start:dist_end].values
-    ax.plot(dist_dates, pred_daily_err, "#F44336", lw=1.5, alpha=0.7, label="Predicted error")
-    ax.plot(dist_dates, corr_daily_err, "#1565C0", lw=1.5, alpha=0.7, label="Corrected error")
-    ax.axhline(0, color="gray", ls="--", lw=1, alpha=0.5)
-    ax.fill_between(dist_dates, pred_daily_err, corr_daily_err, alpha=0.1, color="green",
-                    label="Error reduction zone")
-    ax.set_title("Daily Error: Predicted vs Corrected", fontweight="bold")
-    ax.set_ylabel("Error ($)"); ax.legend(fontsize=8)
-    ax.xaxis.set_major_formatter(mdates.DateFormatter("%d %b"))
-    plt.setp(ax.xaxis.get_majorticklabels(), rotation=25); ax.grid(alpha=0.2)
-
-    fig.suptitle("Three-Way Comparison: True vs Predicted vs Corrected",
-                 fontweight="bold", fontsize=14, y=1.02)
+    fig.suptitle("Section 6 — Proposed Improvements: Ensemble, CV Tuning & Auto-Selection",
+                 fontweight="bold", fontsize=13, y=1.02)
     fig.tight_layout()
-    fig.savefig(out_dir / "plot_three_way_comparison.png", dpi=150, bbox_inches="tight")
+    fig.savefig(out_dir / "plot_improvements.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
 
 
 # ═══════════════════════════════════════════════════════════════
-#  8. PIPELINE
+#  9. PIPELINE
 # ═══════════════════════════════════════════════════════════════
 def run_pipeline(target_ticker="MSFT", data_dir="data", output_dir=None,
-                 n_days=DEFAULT_N_DAYS, dist_depth=DEFAULT_DIST_DEPTH,
-                 lookback=DEFAULT_LOOKBACK, cluster_thr=DEFAULT_CLUSTER_THR,
-                 max_peers=DEFAULT_MAX_PEERS, min_peers=DEFAULT_MIN_PEERS,
-                 dist_length=DEFAULT_DIST_LENGTH, run_sweep=True):
+                 n_days=None, dist_depth=None,
+                 lookback=None, cluster_thr=None,
+                 max_peers=None, min_peers=None,
+                 dist_length=None, run_sweep=None,
+                 dist_start_date=None, dist_end_date=None,
+                 config_path=None):
+    # Resolve config — allow overriding via explicit config_path
+    if config_path is not None:
+        _override_config(config_path)
+    # Resolve defaults from config (with fallback to hard-coded constants)
+    if n_days is None:
+        n_days = _c("data", "n_days", default=DEFAULT_N_DAYS)
+    if dist_depth is None:
+        dist_depth = _c("distress", "dist_depth", default=DEFAULT_DIST_DEPTH)
+    if dist_length is None:
+        dist_length = _c("distress", "dist_length", default=DEFAULT_DIST_LENGTH)
+    if dist_start_date is None:
+        dist_start_date = _c("distress", "dist_start_date", default=DEFAULT_DIST_START_DATE)
+    if dist_end_date is None:
+        dist_end_date = _c("distress", "dist_end_date", default=DEFAULT_DIST_END_DATE)
+    if lookback is None:
+        lookback = _c("peers", "lookback", default=DEFAULT_LOOKBACK)
+    if cluster_thr is None:
+        cluster_thr = _c("peers", "cluster_thr", default=DEFAULT_CLUSTER_THR)
+    if max_peers is None:
+        max_peers = _c("peers", "max_peers", default=DEFAULT_MAX_PEERS)
+    if min_peers is None:
+        min_peers = _c("peers", "min_peers", default=DEFAULT_MIN_PEERS)
+    if run_sweep is None:
+        run_sweep = _c("sweep", "run_sweep", default=True)
     """Run full pipeline for a single target. Returns per-target summary dict."""
     # Output dir = RESULT_PATH / target_ticker (or explicit output_dir)
     if output_dir:
@@ -1388,8 +1696,20 @@ def run_pipeline(target_ticker="MSFT", data_dir="data", output_dir=None,
     prices_df[TARGET_ORIG_KEY] = raw[target_ticker]
     prices_df[DIST_TRUE_KEY] = prices_df[TARGET_ORIG_KEY].copy()
 
-    dist_start = max(40, int(0.60 * n_avail))
-    dist_end = min(dist_start + dist_length, n_avail - 5)
+    # Resolve distress window: dates take priority over index-based calculation
+    if dist_start_date is not None and dist_end_date is not None:
+        dist_start_dt = pd.Timestamp(dist_start_date)
+        dist_end_dt = pd.Timestamp(dist_end_date)
+        if dist_start_dt not in dates or dist_end_dt not in dates:
+            raise ValueError(f"Distress dates {dist_start_date}–{dist_end_date} not in data range "
+                             f"({dates[0].date()} to {dates[-1].date()})")
+        dist_start = dates.get_loc(dist_start_dt)
+        dist_end = dates.get_loc(dist_end_dt) + 1  # +1 because we use Python slice convention
+        print(f"  Distress window from config: {dist_start_date} → {dist_end_date} "
+              f"(indices {dist_start}–{dist_end-1})")
+    else:
+        dist_start = max(40, int(0.60 * n_avail))
+        dist_end = min(dist_start + dist_length, n_avail - 5)
     obs = prices_df[DIST_TRUE_KEY].values.copy()
     for i in range(dist_end - dist_start):
         obs[dist_start + i] *= 1 - dist_depth * np.sin(np.pi * i / (dist_end - dist_start - 1))
@@ -1494,8 +1814,13 @@ def run_pipeline(target_ticker="MSFT", data_dir="data", output_dir=None,
 
     # ── Step 5: Evaluate ──
     print("  Evaluating ...")
-    summary_df = evaluate_reconstructions(recon, prices_df, dist_start, dist_end)
-    summary_df.to_csv(out / "evaluation.csv", index=False)
+    simple_fill_methods = {"Forward Fill", "Backward Fill", "Linear Interp"}
+    # Full evaluation (all methods — used for the comparison grid plot)
+    summary_df_all = evaluate_reconstructions(recon, prices_df, dist_start, dist_end)
+    summary_df_all.to_csv(out / "evaluation.csv", index=False)
+    # Filtered evaluation (advanced methods only — used for best-method selection)
+    summary_df = summary_df_all[~summary_df_all["Method"].isin(simple_fill_methods)].copy()
+    summary_df = summary_df.reset_index(drop=True)
     recon_df = pd.DataFrame(recon)
     recon_df.to_csv(out / "reconstructions.csv")
 
@@ -1539,28 +1864,110 @@ def run_pipeline(target_ticker="MSFT", data_dir="data", output_dir=None,
     bt_df, eq_true, eq_obs, perf_true, perf_obs = run_backtests(recon, prices_df)
     bt_df.to_csv(out / "backtest_results.csv")
 
-    # ── Step 8: Plots ──
+    # ── Section 6 — Proposed Improvements ──
+    print("  Section 6 — Proposed Improvements ...")
+    improvement_meta = {}
+    try:
+        # Improvement 1: Ensemble averaging of top 3 methods
+        for method_name in ("mean", "median", "rmse_weighted"):
+            ens_result = ensemble_top3_reconstruction(
+                recon, summary_df, prices_df[DIST_OBS_KEY], prices_df[DIST_TRUE_KEY],
+                dist_start, dist_end, top_n=3, method=method_name)
+            label = f"Ensemble Top3 ({method_name})"
+            recon[label] = ens_result["predicted"]
+            improvement_meta[f"Ensemble_{method_name}_RMSE"] = ens_result["rmse"]
+            print(f"    {label:<35} RMSE={ens_result['rmse']:.4f}")
+
+        # Improvement 2: Cross-validation hyperparameter tuning
+        cv_grid = {"lookback": [40, 60, 80], "threshold": [0.25, 0.35, 0.45], "max_peers": [3, 5]}
+        cv_results = tune_hyperparameters_cv(
+            ret_df, prices_df[DIST_OBS_KEY], prices_df[DIST_TRUE_KEY],
+            dist_start, dist_end,
+            lookback_grid=cv_grid["lookback"],
+            threshold_grid=cv_grid["threshold"],
+            peer_grid=cv_grid["max_peers"])
+        if not cv_results.empty:
+            best_cv = cv_results.iloc[0]
+            improvement_meta["CV_Best_LB"] = int(best_cv["lookback"])
+            improvement_meta["CV_Best_THR"] = float(best_cv["threshold"])
+            improvement_meta["CV_Best_MP"] = int(best_cv["max_peers"])
+            improvement_meta["CV_RMSE"] = float(best_cv["test_rmse"])
+            print(f"    CV Tuning: LB={best_cv['lookback']}, THR={best_cv['threshold']:.2f}, "
+                  f"MP={best_cv['max_peers']}  (RMSE={best_cv['test_rmse']:.4f})")
+
+            # Store CV result in recon
+            best_label = f"ML Proxy+CV (LB={int(best_cv['lookback'])})"
+            if best_label not in recon:
+                win_start_cv = max(0, dist_start - 1 - int(best_cv["lookback"]))
+                win_end_cv = dist_start - 1
+                pre_win = ret_df.iloc[win_start_cv:win_end_cv].copy()
+                dist_mat = feature_distance_matrix(pre_win, use_pca=False)
+                linkage_mat = linkage(squareform(dist_mat.values), method="ward")
+                labels = fcluster(linkage_mat, t=best_cv["threshold"], criterion="distance")
+                stocks = dist_mat.columns.tolist()
+                clust_id = labels[stocks.index("DIST")]
+                same_cluster = [s for s, cid in zip(stocks, labels)
+                                if cid == clust_id and s != "DIST"]
+                corr_mat = pre_win.corr()
+                raw_corr = corr_mat.loc["DIST"].drop("DIST")
+                peers = (sorted(same_cluster, key=lambda s: abs(raw_corr[s]), reverse=True)[:int(best_cv["max_peers"])]
+                         if same_cluster else raw_corr.abs().sort_values(ascending=False).index[:int(best_cv["max_peers"])].tolist())
+                peer_cols = [p for p in peers if p in pre_win.columns]
+                if peer_cols:
+                    model = LinearRegression().fit(pre_win[peer_cols].values, pre_win["DIST"].values)
+                    gap_ret_cv = ret_df[peer_cols].iloc[dist_start:dist_end].values
+                    pred_log_ret_cv = model.predict(gap_ret_cv)
+                    series_cv = prices_df[DIST_OBS_KEY].copy()
+                    for i in range(dist_end - dist_start):
+                        series_cv.iloc[dist_start + i] = series_cv.iloc[dist_start + i - 1] * np.exp(pred_log_ret_cv[i])
+                    recon[best_label] = series_cv
+
+        # Improvement 3: Automated method selection
+        selection = auto_select_method(
+            prices_df[DIST_OBS_KEY], ret_df, dist_start, dist_end, recon, summary_df)
+        improvement_meta["AutoSelect_Recommended"] = selection["recommended_method"]
+        improvement_meta["AutoSelect_BestFromData"] = selection.get("best_from_evaluation", "")
+        print(f"    Auto-Select: recommends '{selection['recommended_method']}', "
+              f"data says '{selection.get('best_from_evaluation', 'N/A')}'")
+
+    except Exception as e:
+        print(f"    (improvements skipped: {e})")
+
+    # ── Re-evaluate summary_df_all to include ensemble/CV methods in the grid ──
+    summary_df_all = evaluate_reconstructions(recon, prices_df, dist_start, dist_end)
+    summary_df_all.to_csv(out / "evaluation.csv", index=False)
+
+    # ── Step 8: Plots (3 plots) ──
+    #   plot_comparison_grid.png  — all methods including simple fills + ensembles
+    #   plot_best_method.png      — highlight best performers (advanced methods only)
+    #   plot_improvements.png     — Section 6: ensemble + CV tuning comparison
     print("  Generating plots ...")
     try:
-        _plot_comparison_grid(summary_df, recon, prices_df, dates, dist_start, dist_end, out)
-        _plot_overlay(summary_df, recon, prices_df, dates, dist_start, dist_end, out)
-        # Simpler drift plot
-        drift_metrics = compute_drift_metrics(recon[best_name], prices_df[DIST_TRUE_KEY],
-                                               dist_start, dist_end)
-        fig, ax = plt.subplots(figsize=(14, 5))
-        ax.plot(drift_metrics.index, drift_metrics["cum_error"], color="#D32F2F", lw=2)
-        ax.fill_between(drift_metrics.index, 0, drift_metrics["cum_error"],
-                        color="#D32F2F", alpha=0.15)
-        ax.axhline(0, color="gray", lw=0.7, ls="--")
-        ax.set_title(f"Drift — {best_name}", fontweight="bold")
-        ax.set_ylabel("Cumulative Error ($)")
-        fig.tight_layout(); fig.savefig(out / "plot_drift.png", dpi=150, bbox_inches="tight")
-        plt.close(fig)
-        # New plots
-        _plot_actual_vs_predicted(summary_df, recon, prices_df, dates, dist_start, dist_end, out)
+        _plot_comparison_grid(summary_df_all, recon, prices_df, dates, dist_start, dist_end, out)
         _plot_best_method(summary_df, recon, prices_df, dates, dist_start, dist_end, out)
-        _plot_three_way_comparison(summary_df, recon, drift_series_dict, prices_df,
-                                   dates, dist_start, dist_end, out)
+
+        # Plot 3: Section 6 — Improvements (ensemble, CV tuning comparison)
+        improvement_names = [k for k in recon if k.startswith("Ensemble Top3") or "CV (LB" in k]
+        compare_rows = []
+        for name in improvement_names:
+            if name not in recon:
+                continue
+            pred = recon[name].iloc[dist_start:dist_end].values
+            true = prices_df[DIST_TRUE_KEY].iloc[dist_start:dist_end].values
+            pred_ret = np.log(pred / recon[name].iloc[dist_start - 1:dist_end - 1].values)
+            true_ret = np.log(true / prices_df[DIST_TRUE_KEY].iloc[dist_start - 1:dist_end - 1].values)
+            compare_rows.append({"Method": name,
+                                 "RMSE": np.sqrt(mean_squared_error(true, pred)),
+                                 "MAE": np.mean(np.abs(true - pred)),
+                                 "Ret Corr": np.corrcoef(pred_ret, true_ret)[0, 1]})
+        if summary_df is not None and not summary_df.empty:
+            best_base = summary_df.iloc[0]
+            compare_rows.append({"Method": f"{best_base['Method']} (best baseline)",
+                                 "RMSE": best_base["RMSE"], "MAE": best_base["MAE"],
+                                 "Ret Corr": best_base["Return Corr"]})
+        if compare_rows:
+            compare_df = pd.DataFrame(compare_rows).sort_values("RMSE").reset_index(drop=True)
+            _plot_improvements(compare_df, recon, prices_df, dates, dist_start, dist_end, out)
     except Exception as e:
         print(f"  (plotting skipped: {e})")
 
@@ -1571,11 +1978,12 @@ def run_pipeline(target_ticker="MSFT", data_dir="data", output_dir=None,
         f"  Samples     : {n_avail}",
         f"  Distress    : {dates[dist_start].date()} – {dates[dist_end-1].date()}",
         f"  Lookback    : {lookback}  |  Threshold: {cluster_thr:.2f}", "",
-        "-" * 72, "  EVALUATION (sorted by RMSE)", "-" * 72]
-    for _, r in summary_df.iterrows():
+        "-" * 72, "  EVALUATION (all methods, sorted by RMSE)", "-" * 72]
+    for _, r in summary_df_all.iterrows():
         report.append(f"  {r['Method']:<35s}  RMSE={r['RMSE']:.4f}  "
                       f"MAE={r['MAE']:.4f}  RetCorr={r['Return Corr']:.4f}")
-    report += ["", "-" * 72, "  DRIFT CORRECTION", "-" * 72]
+    report += ["", f"  * Best (advanced method): {best_name} (RMSE={best_rmse_val:.4f})",
+               "", "-" * 72, "  DRIFT CORRECTION", "-" * 72]
     for _, r in drift_df.iterrows():
         report.append(f"  {r['Method']:<45s}  RMSE={r['RMSE']:.4f}  "
                       f"MaxDrift={r['Max Drift']:.4f}")
@@ -1620,10 +2028,11 @@ def run_pipeline(target_ticker="MSFT", data_dir="data", output_dir=None,
 #  9. MULTI-TARGET WRAPPER
 # ═══════════════════════════════════════════════════════════════
 def run_multi_target(target_list, data_dir="data", output_dir=None,
-                     n_days=DEFAULT_N_DAYS, dist_depth=DEFAULT_DIST_DEPTH,
-                     lookback=DEFAULT_LOOKBACK, cluster_thr=DEFAULT_CLUSTER_THR,
-                     max_peers=DEFAULT_MAX_PEERS, min_peers=DEFAULT_MIN_PEERS,
-                     dist_length=DEFAULT_DIST_LENGTH, run_sweep=True):
+                     n_days=None, dist_depth=None,
+                     lookback=None, cluster_thr=None,
+                     max_peers=None, min_peers=None,
+                     dist_length=None, run_sweep=None,
+                     config_path=None):
     """Run pipeline for a list of (ticker, sector) tuples.  Returns consolidated DataFrame."""
     if output_dir:
         base = Path(output_dir)
@@ -1640,7 +2049,7 @@ def run_multi_target(target_list, data_dir="data", output_dir=None,
                 n_days=n_days, dist_depth=dist_depth, dist_length=dist_length,
                 lookback=lookback, cluster_thr=cluster_thr,
                 max_peers=max_peers, min_peers=min_peers,
-                run_sweep=run_sweep)
+                run_sweep=run_sweep, config_path=config_path)
             all_rows.append(row)
         except Exception as e:
             print(f"  ERROR on {ticker}: {e}")
@@ -1701,19 +2110,24 @@ def main():
        reconstruction.
     7. Backtests a mean-reversion strategy on every reconstructed series
        and compares with the true and observed (corrupted) paths.
-    8. Generates six diagnostic plots saved as PNG:
-       - Per-Method Comparison grid (actual vs predicted in distress window)
-       - Reconstruction Method Comparison overlay + RMSE bar chart
-       - Drift cumulative error chart
-       - **Actual vs Predicted** (scatter + histogram + percentile comparison)
-       - **Best Method Highlight** (top-3 overlay + metric bars + trade-off)
-       - **3-Way Comparison** (true vs predicted vs corrected + error reduction)
-    9. Writes interim results to ``<output_dir>/<target>/``:
-       ``evaluation.csv``, ``reconstructions.csv``, ``sweep_results.csv``,
-       ``drift_results.csv``, ``backtest_results.csv``, ``report.txt``,
-       ``plot_comparison_grid.png``, ``plot_method_comparison.png``,
-       ``plot_drift.png``.
-    10. Appends a single-row summary to ``consolidated_report.csv`` at the
+    8. **Section 6 — Proposed Improvements:**
+       - **6A** Ensemble averaging of top 3 methods (mean, median, RMSE-weighted).
+       - **6B** Cross-validation hyperparameter tuning (TimeSeriesSplit).
+       - **6C** Automated method selection based on distress characteristics.
+       - Results stored in ``recon`` dict (ensemble series, CV-tuned series).
+    9. Generates three diagnostic plots saved as PNG:
+       - **plot_comparison_grid.png** — Per-Method grid (all methods including
+         simple fills and ensemble methods, for visual reference).
+       - **plot_best_method.png** — Highlight Best Performers (top-5 overlay,
+         metric bar chart, RMSE/RetCorr trade-off scatter).
+       - **plot_improvements.png** — Section 6 Improvements (ensemble + CV
+         tuning overlay and RMSE comparison).
+    10. Writes interim results to ``<output_dir>/<target>/``:
+        ``evaluation.csv``, ``reconstructions.csv``, ``sweep_results.csv``,
+        ``drift_results.csv``, ``backtest_results.csv``, ``report.txt``,
+        ``plot_comparison_grid.png``, ``plot_best_method.png``,
+        ``plot_improvements.png``.
+    11. Appends a single-row summary to ``consolidated_report.csv`` at the
         output root.
 
     ── Multi-target mode (comma-separated) ──────────────────────────
@@ -1780,14 +2194,20 @@ def main():
                         help=f"Maximum peers used in the OLS regression model  (default: {DEFAULT_MAX_PEERS})")
     parser.add_argument("--no-sweep", action="store_true",
                         help="Skip the ML Proxy parameter grid-search (saves time)")
+    parser.add_argument("--config", type=str, default=None,
+                        help=f"Path to custom config.json  (default: {CONFIG_PATH})")
     parser.add_argument("--sectors", type=str, nargs="+", default=None,
                         help="Restrict to specific sectors when --target=ALL, e.g. --sectors Technology HealthCare")
     args = parser.parse_args()
 
+    # Load custom config if provided
+    if args.config is not None:
+        _override_config(args.config)
+
     run_sweep = not args.no_sweep
     target_str = args.target.upper()
 
-    if target_str == "ALL":
+    if target_str == "SECTOR":
         # Discover targets — one per sector
         instruments_df, _ = load_data(args.data_dir)
         targets = [(instruments_df[instruments_df["sector"] == s]["symbol"].iloc[0], s)
@@ -1796,7 +2216,19 @@ def main():
         run_multi_target(targets, data_dir=args.data_dir, n_days=args.n_days,
                          dist_depth=args.dist_depth, dist_length=args.dist_length,
                          lookback=args.lookback, cluster_thr=args.threshold,
-                         max_peers=args.max_peers, run_sweep=run_sweep)
+                         max_peers=args.max_peers, run_sweep=run_sweep,
+                         config_path=args.config)
+    elif target_str == 'ALL':
+        # Run across all instruments in the universe
+        instruments_df, _ = load_data(args.data_dir)
+        sector_map = dict(zip(instruments_df["symbol"].str.upper(), instruments_df["sector"]))
+        targets = [(sym.upper(), sector_map.get(sym.upper(), "Unknown"))
+                   for sym in instruments_df["symbol"]]
+        run_multi_target(targets, data_dir=args.data_dir, n_days=args.n_days,
+                         dist_depth=args.dist_depth, dist_length=args.dist_length,
+                         lookback=args.lookback, cluster_thr=args.threshold,
+                         max_peers=args.max_peers, run_sweep=run_sweep,
+                         config_path=args.config)
 
     elif "," in target_str:
         # Comma-separated list of tickers
@@ -1807,7 +2239,8 @@ def main():
         run_multi_target(targets, data_dir=args.data_dir, n_days=args.n_days,
                          dist_depth=args.dist_depth, dist_length=args.dist_length,
                          lookback=args.lookback, cluster_thr=args.threshold,
-                         max_peers=args.max_peers, run_sweep=run_sweep)
+                         max_peers=args.max_peers, run_sweep=run_sweep,
+                         config_path=args.config)
 
     else:
         # Single target
@@ -1817,7 +2250,7 @@ def main():
             n_days=args.n_days, dist_depth=args.dist_depth,
             dist_length=args.dist_length, lookback=args.lookback,
             cluster_thr=args.threshold, max_peers=args.max_peers,
-            run_sweep=run_sweep)
+            run_sweep=run_sweep, config_path=args.config)
         # Also save single-target summary to consolidated
         single_df = pd.DataFrame([result])
         if args.output_dir:
