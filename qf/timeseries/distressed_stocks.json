@@ -1,0 +1,199 @@
+{
+  "_description": "Distressed stocks configuration — tickers, peers, market indices, and known distress dates. All data sourced from public information (SEC filings, press releases, YFinance).",
+  "_version": "1.0",
+  "_last_updated": "2026-06-14",
+  
+  "stocks": {
+      "ATO.PA": {
+      "name": "Atos SE",
+      "sector": "Technology",
+      "industry": "Information Technology Services",
+      "peers": ["CAP.PA", "SOP.PA", "INFY", "WIT", "ACN", "CTSH"],
+      "market_index": "^FCHI",
+      "distress_start": "2023-07-01",
+      "distress_end": "2024-12-31",
+      "known_event": "Massive debt burden (EUR 5B+); series of profit warnings; failed asset sales; share price collapsed from EUR 80 to <EUR 1",
+      "event_type": "Debt-Driven Distress"
+    },
+    "RIG": {
+      "name": "Transocean Ltd.",
+      "sector": "Energy",
+      "industry": "Oil & Gas Drilling",
+      "peers": ["SLB", "HAL", "BKR", "NOV"],
+      "market_index": "^GSPC",
+      "distress_start": "2015-10-01",
+      "distress_end": "2017-03-01",
+      "known_event": "Chapter 11 bankruptcy filing (2017-11-15); oil price crash 2014-2016; massive debt burden",
+      "event_type": "Bankruptcy / Restructuring"
+    },
+    "HP": {
+      "name": "Helmerich & Payne Inc.",
+      "sector": "Energy",
+      "industry": "Oil & Gas Drilling",
+      "peers": ["SLB", "HAL", "BKR", "NOV"],
+      "market_index": "^GSPC",
+      "distress_start": "2015-01-01",
+      "distress_end": "2016-06-30",
+      "known_event": "Deep cyclical downturn in land drilling; revenue collapsed 60%+ from peak",
+      "event_type": "Cyclical Distress"
+    },
+    "OXY": {
+      "name": "Occidental Petroleum Corp.",
+      "sector": "Energy",
+      "industry": "Oil & Gas E&P",
+      "peers": ["XOM", "CVX", "COP", "EOG"],
+      "market_index": "^GSPC",
+      "distress_start": "2019-08-01",
+      "distress_end": "2020-11-30",
+      "known_event": "Junk rating downgrade after debt-fueled Anadarko acquisition (2019); COVID oil crash (March 2020)",
+      "event_type": "Debt-Driven Distress"
+    },
+    "PTEN": {
+      "name": "Patterson-UTI Energy Inc.",
+      "sector": "Energy",
+      "industry": "Oil & Gas Drilling",
+      "peers": ["SLB", "HAL", "BKR", "NOV"],
+      "market_index": "^GSPC",
+      "distress_start": "2019-06-01",
+      "distress_end": "2020-12-31",
+      "known_event": "2019-20 drilling slump; COVID demand destruction",
+      "event_type": "Cyclical Distress"
+    },
+    "WTI": {
+      "name": "W&T Offshore Inc.",
+      "sector": "Energy",
+      "industry": "Oil & Gas E&P",
+      "peers": ["OXY", "COP", "EOG", "XOM"],
+      "market_index": "^GSPC",
+      "distress_start": "2019-10-01",
+      "distress_end": "2021-03-31",
+      "known_event": "Small-cap E&P; severe leverage; COVID oil price collapse",
+      "event_type": "Debt-Driven Distress"
+    },
+    "M": {
+      "name": "Macy's Inc.",
+      "sector": "Consumer Cyclical",
+      "industry": "Department Stores",
+      "peers": ["KSS", "JWN", "TGT", "WMT"],
+      "market_index": "^GSPC",
+      "distress_start": "2020-03-01",
+      "distress_end": "2020-08-31",
+      "known_event": "COVID retail apocalypse; store closures; potential buyout targets",
+      "event_type": "Industry Disruption"
+    },
+    "GPS": {
+      "name": "Gap Inc.",
+      "sector": "Consumer Cyclical",
+      "industry": "Department Stores",
+      "peers": ["AEO", "ANF", "ROST", "TJX"],
+      "market_index": "^GSPC",
+      "distress_start": "2020-03-01",
+      "distress_end": "2020-09-30",
+      "known_event": "COVID store closures; Old Navy spin-off canceled",
+      "event_type": "Industry Disruption"
+    },
+    "KSS": {
+      "name": "Kohl's Corp.",
+      "sector": "Consumer Cyclical",
+      "industry": "Department Stores",
+      "peers": ["M", "JWN", "TGT", "ROST"],
+      "market_index": "^GSPC",
+      "distress_start": "2022-06-01",
+      "distress_end": "2024-03-31",
+      "known_event": "Activist pressure; sales decline 2022-24; potential take-private",
+      "event_type": "Activist / Restructuring"
+    },
+    "JWN": {
+      "name": "Nordstrom Inc.",
+      "sector": "Consumer Cyclical",
+      "industry": "Department Stores",
+      "peers": ["M", "KSS", "DDS", "TGT"],
+      "market_index": "^GSPC",
+      "distress_start": "2020-03-01",
+      "distress_end": "2020-09-30",
+      "known_event": "COVID mall traffic collapse; potential take-private explored",
+      "event_type": "Industry Disruption"
+    },
+    "DAL": {
+      "name": "Delta Air Lines Inc.",
+      "sector": "Industrials",
+      "industry": "Airlines",
+      "peers": ["UAL", "LUV", "ALK", "JBLU"],
+      "market_index": "^GSPC",
+      "distress_start": "2020-03-01",
+      "distress_end": "2020-12-31",
+      "known_event": "COVID near-bankruptcy; government bailout (CARES Act)",
+      "event_type": "Systemic Shock / Bailout"
+    },
+    "UAL": {
+      "name": "United Airlines Holdings Inc.",
+      "sector": "Industrials",
+      "industry": "Airlines",
+      "peers": ["DAL", "LUV", "AAL", "JBLU"],
+      "market_index": "^GSPC",
+      "distress_start": "2020-03-01",
+      "distress_end": "2020-12-31",
+      "known_event": "COVID demand collapse; government payroll support",
+      "event_type": "Systemic Shock / Bailout"
+    },
+    "AAL": {
+      "name": "American Airlines Group Inc.",
+      "sector": "Industrials",
+      "industry": "Airlines",
+      "peers": ["DAL", "UAL", "LUV", "JBLU"],
+      "market_index": "^GSPC",
+      "distress_start": "2020-03-01",
+      "distress_end": "2020-12-31",
+      "known_event": "Most levered US carrier; Ch.11 risk during COVID; government bailout",
+      "event_type": "Systemic Shock / Bailout"
+    },
+    "INTC": {
+      "name": "Intel Corp.",
+      "sector": "Technology",
+      "industry": "Semiconductors",
+      "peers": ["AMD", "NVDA", "QCOM", "MRVL"],
+      "market_index": "^GSPC",
+      "distress_start": "2024-04-01",
+      "distress_end": "2025-09-30",
+      "known_event": "Foundry losses; massive restructuring; dividend cut; 15% workforce reduction announced Aug 2024",
+      "event_type": "Restructuring"
+    },
+    "CVNA": {
+      "name": "Carvana Co.",
+      "sector": "Consumer Cyclical",
+      "industry": "Auto Retail",
+      "peers": ["KMX", "AN", "PAG", "GPII"],
+      "market_index": "^GSPC",
+      "distress_start": "2022-03-01",
+      "distress_end": "2023-07-31",
+      "known_event": "Near-bankruptcy 2022; debt restructuring; share price collapsed 98% from peak",
+      "event_type": "Near-Bankruptcy / Restructuring"
+    },
+    "SIVBQ": {
+      "name": "SVB Financial Group (Silicon Valley Bank)",
+      "sector": "Financial Services",
+      "industry": "Banks—Regional",
+      "peers": ["JPM", "C", "BAC", "GS"],
+      "market_index": "^GSPC",
+      "distress_start": "2023-03-08",
+      "distress_end": "2023-03-28",
+      "known_event": "Bank run March 9-10 2023; seized by FDIC March 10; ticker changed to SIVBQ",
+      "event_type": "Bank Failure"
+    }
+  },
+
+  "sector_universes": {
+    "Energy":       ["XOM", "CVX", "COP", "EOG", "SLB", "OXY", "RIG", "HP", "PTEN", "WTI"],
+    "Retail":       ["WMT", "TGT", "COST", "M", "GPS", "JWN", "KSS", "AMZN"],
+    "Airlines":     ["DAL", "UAL", "AAL", "LUV", "JBLU", "ALK", "SAVE"],
+    "Technology":   ["AAPL", "MSFT", "GOOGL", "META", "NVDA", "AMD", "INTC", "CRM", "ADBE", "ORCL"]
+  },
+
+  "global_settings": {
+    "default_market_index": "^GSPC",
+    "pre_distress_lookback_days": 252,
+    "post_distress_lookback_days": 60,
+    "distress_composite_threshold": 0.4,
+    "min_distress_episode_days": 5
+  }
+}
