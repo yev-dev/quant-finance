@@ -20,6 +20,7 @@ Visualization functions use a `show_graphs` flag (default True).
 
 import json
 import logging
+import os
 import warnings
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -65,7 +66,89 @@ DISTRESS_THRESHOLD = 1.81
 GREY_THRESHOLD = 2.99
 
 _DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "distressed_stocks.json"
+
+# ── Data directory resolution ───────────────────────────────────────────────
 _DEFAULT_DATA_DIR = Path(__file__).resolve().parent.parent.parent / "distressed_data"
+_DEFAULT_OUTPUT_ROOT = Path(__file__).resolve().parent.parent.parent / "distress_output"
+
+
+def _resolve_data_dir() -> Path:
+    """Resolve the data cache directory.
+
+    Priority:
+      1. DISTRESSED_DATA_DIR environment variable
+      2. DATA_DIR environment variable
+      3. Default: <project_root>/distressed_data/
+    """
+    env = os.environ.get("DISTRESSED_DATA_DIR") or os.environ.get("DATA_DIR")
+    if env:
+        p = Path(env).resolve()
+    else:
+        p = _DEFAULT_DATA_DIR
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _resolve_output_dir(config: Optional[dict] = None) -> Path:
+    """Resolve output directory.
+
+    Priority:
+      1. DISTRESSED_OUTPUT_DIR environment variable
+      2. OUTPUT_DIR environment variable
+      3. config global_settings.output_dir relative to project root
+      4. Default: <project_root>/distress_output/
+    """
+    env = os.environ.get("DISTRESSED_OUTPUT_DIR") or os.environ.get("OUTPUT_DIR")
+    if env:
+        p = Path(env).resolve()
+    else:
+        if config:
+            rel = config.get("global_settings", {}).get("output_dir", "distress_output")
+            if rel:
+                p = Path(__file__).resolve().parent.parent.parent / rel
+            else:
+                p = _DEFAULT_OUTPUT_ROOT
+        else:
+            p = _DEFAULT_OUTPUT_ROOT
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def get_stock_output_dir(ticker: str, config: Optional[dict] = None) -> Path:
+    """Get/create the per-stock output directory under distress_output/{TICKER}/."""
+    base = _resolve_output_dir(config)
+    d = base / ticker
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def get_output_config(config: Optional[dict] = None) -> bool:
+    """Read the global save_output flag from config."""
+    if config:
+        return config.get("global_settings", {}).get("save_output", True)
+    return True
+
+
+def save_figure_to_output(
+    fig, ticker: str, name: str, config: Optional[dict] = None,
+):
+    """Save a matplotlib figure to distress_output/{TICKER}/{name}.png."""
+    d = get_stock_output_dir(ticker, config)
+    path = d / f"{name}.png"
+    fig.savefig(path, dpi=150, bbox_inches="tight", facecolor="white")
+    logger.info("Saved figure: %s", path)
+    return path
+
+
+def save_df_to_output(
+    df: "pd.DataFrame", ticker: str, name: str, config: Optional[dict] = None,
+):
+    """Save a DataFrame as CSV to distress_output/{TICKER}/{name}.csv."""
+    d = get_stock_output_dir(ticker, config)
+    path = d / f"{name}.csv"
+    df.to_csv(path, index=True)
+    logger.info("Saved CSV: %s", path)
+    return path
 
 
 def load_config(config_path: Optional[Union[str, Path]] = None) -> dict:
@@ -118,6 +201,25 @@ def list_distressed_tickers(config: Optional[dict] = None) -> List[str]:
     return list(config["stocks"].keys())
 
 
+def load_name_map(config: Optional[dict] = None) -> Dict[str, str]:
+    """Build a merged ticker→name map from config stocks + built-in map.
+
+    Distressed stock names come from config. Peer and index names come from
+    the built-in _BUILTIN_NAME_MAP.  Config names take precedence.
+    """
+    if config is None:
+        config = load_config()
+    merged = dict(_BUILTIN_NAME_MAP)
+    # Override with names from config stocks
+    for tkr, cfg in config.get("stocks", {}).items():
+        if cfg.get("name"):
+            merged[tkr] = cfg["name"]
+    # Add any names from config-level name_map if present
+    config_name_map = config.get("name_map", {})
+    merged.update(config_name_map)
+    return merged
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 1. CACHED DATA DOWNLOAD
 # ══════════════════════════════════════════════════════════════════════════════
@@ -160,7 +262,7 @@ def cached_download(
     -------
     pd.DataFrame of adjusted close prices, columns = tickers.
     """
-    data_path = Path(data_dir) if data_dir else _DEFAULT_DATA_DIR
+    data_path = Path(data_dir) if data_dir else _resolve_data_dir()
     data_path.mkdir(parents=True, exist_ok=True)
 
     cache_file = data_path / f"{_ticker_key(tickers)}_{start}_{end}.parquet"
@@ -428,13 +530,13 @@ def compute_merton_dd(
         def _eq_err(V):
             d1 = (np.log(V / debt_face_value) + (risk_free_rate + 0.5 * asset_vol**2) * time_to_maturity) / (asset_vol * np.sqrt(time_to_maturity))
             d2 = d1 - asset_vol * np.sqrt(time_to_maturity)
-            return V * scipy_norm.cdf(d1) - debt_face_value * np.exp(-risk_free_rate * time_to_maturity) * scipy_norm.cdf(d2) - equity_value
+            return V * norm.cdf(d1) - debt_face_value * np.exp(-risk_free_rate * time_to_maturity) * norm.cdf(d2) - equity_value
         try:
             V_sol = brentq(_eq_err, equity_value * 0.5, equity_value * 5.0, maxiter=max_iter)
         except (ValueError, RuntimeError):
             return np.inf
         d1 = (np.log(V_sol / debt_face_value) + (risk_free_rate + 0.5 * asset_vol**2) * time_to_maturity) / (asset_vol * np.sqrt(time_to_maturity))
-        return (equity_vol * equity_value) / (V_sol * scipy_norm.cdf(d1)) - asset_vol
+        return (equity_vol * equity_value) / (V_sol * norm.cdf(d1)) - asset_vol
 
     try:
         sigma_V = brentq(_merton_eq_err, equity_vol * 0.1, equity_vol * 3.0, maxiter=max_iter)
@@ -444,7 +546,7 @@ def compute_merton_dd(
     def _eq_err_V(V):
         d1 = (np.log(V / debt_face_value) + (risk_free_rate + 0.5 * sigma_V**2) * time_to_maturity) / (sigma_V * np.sqrt(time_to_maturity))
         d2 = d1 - sigma_V * np.sqrt(time_to_maturity)
-        return V * scipy_norm.cdf(d1) - debt_face_value * np.exp(-risk_free_rate * time_to_maturity) * scipy_norm.cdf(d2) - equity_value
+        return V * norm.cdf(d1) - debt_face_value * np.exp(-risk_free_rate * time_to_maturity) * norm.cdf(d2) - equity_value
 
     try:
         V = brentq(_eq_err_V, equity_value * 0.5, equity_value * 5.0, maxiter=max_iter)
@@ -452,7 +554,7 @@ def compute_merton_dd(
         V = equity_value + debt_face_value * np.exp(-risk_free_rate * time_to_maturity)
 
     dd = (np.log(V / debt_face_value) + (risk_free_rate - 0.5 * sigma_V**2) * time_to_maturity) / (sigma_V * np.sqrt(time_to_maturity))
-    return {"DD": dd, "PD": scipy_norm.cdf(-dd), "asset_value": V, "asset_vol": sigma_V}
+    return {"DD": dd, "PD": norm.cdf(-dd), "asset_value": V, "asset_vol": sigma_V}
 
 
 def detect_volatility_regime(
@@ -1869,3 +1971,237 @@ def build_source_mapping(
 
     logger.info("Source mapping written to %s (%d entities)", output_path, len(df))
     return df
+
+
+def build_consolidated_summary(
+    config: Optional[dict] = None,
+    output_path: Optional[Union[str, Path]] = None,
+) -> "pd.DataFrame":
+    """Build a consolidated distressed stocks summary CSV.
+
+    Generates ``consolidated_distressed_stocks.csv`` in the output root
+    directory with one row per distressed stock summarising key metrics
+    from the entire analysis pipeline.
+
+    Parameters
+    ----------
+    config : dict, optional
+        Pre-loaded config.
+    output_path : str or Path, optional
+        Path for the CSV. Defaults to ``distress_output/consolidated_distressed_stocks.csv``.
+
+    Returns
+    -------
+    pd.DataFrame
+    """
+    if config is None:
+        config = load_config()
+
+    name_map = load_name_map(config)
+    root = _resolve_output_dir(config)
+    if output_path is None:
+        output_path = root / "consolidated_distressed_stocks.csv"
+
+    rows = []
+    for tkr, cfg in config.get("stocks", {}).items():
+        peers = cfg.get("peers", [])
+        row = {
+            "ticker": tkr,
+            "name": cfg.get("name", ""),
+            "sector": cfg.get("sector", ""),
+            "industry": cfg.get("industry", ""),
+            "market_index": cfg.get("market_index", ""),
+            "index_name": name_map.get(cfg.get("market_index", ""), ""),
+            "n_peers": len(peers),
+            "peers": ", ".join(peers),
+            "peer_names": ", ".join(name_map.get(p, p) for p in peers),
+            "distress_start": cfg.get("distress_start", ""),
+            "distress_end": cfg.get("distress_end", ""),
+            "event_type": cfg.get("event_type", ""),
+            "known_event": cfg.get("known_event", ""),
+            "output_folder": str(get_stock_output_dir(tkr, config)),
+        }
+        rows.append(row)
+
+    df = pd.DataFrame(rows)
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(output_path, index=False)
+    logger.info("Consolidated summary written to %s (%d stocks)", output_path, len(df))
+    return df
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 13. PIPELINE - Run full analysis for all distressed stocks
+# ══════════════════════════════════════════════════════════════════════════════
+
+def run_full_pipeline(
+    config=None,
+    show_graphs: bool = True,
+    save_output: bool = True,
+) -> dict:
+    """Run the complete distress analysis pipeline for all config stocks."""
+    if config is None:
+        config = load_config()
+        print(f"Config loaded: {len(config.get('stocks', {}))} stocks")
+
+    name_map = load_name_map(config)
+    tickers = list_distressed_tickers(config)
+    output_root = _resolve_output_dir(config)
+    data_root = _resolve_data_dir()
+
+    print(f"\n{'='*70}")
+    print("DISTRESS ANALYSIS PIPELINE")
+    print('=' * 70)
+    print(f"  Data dir:   {data_root}")
+    print(f"  Output dir: {output_root}")
+    print(f"  Stocks:     {len(tickers)}")
+    print(f"  Graphs:     {'ON' if show_graphs else 'OFF'}")
+    print(f"  Save files: {'ON' if save_output else 'OFF'}")
+
+    result = {"config": config, "name_map": name_map, "tickers": tickers}
+
+    # 1. Source mapping + consolidated CSV
+    if save_output:
+        build_source_mapping(config=config)
+        build_consolidated_summary(config=config)
+        print(f"\n  -> Source mapping and consolidated CSV written to {output_root}")
+
+    # 2. Cross-sector R2 validation
+    try:
+        r2_results = run_sector_r2_validation(
+            lookback_years=3, market_proxy="SPY", show_graphs=show_graphs,
+        )
+        result["r2_results"] = r2_results
+        if save_output and not r2_results.empty:
+            r2_results.to_csv(output_root / "sector_r2_validation.csv", index=False)
+        print(f"  -> Cross-sector R2 validation: {len(r2_results)} sectors")
+    except Exception as e:
+        print(f"  x R2 validation skipped: {e}")
+
+    # 3. Per-stock analysis
+    recons = {}
+    for tkr in tickers:
+        cfg = get_stock_config(tkr, config)
+        print(f"\n  -- Processing {tkr} ({cfg['name']}) --")
+        try:
+            ds = pd.Timestamp(cfg["distress_start"])
+            de = pd.Timestamp(cfg["distress_end"])
+            dl_start = (ds - pd.DateOffset(years=3)).strftime("%Y-%m-%d")
+            dl_end   = (de + pd.DateOffset(years=1)).strftime("%Y-%m-%d")
+            peers = cfg["peers"]
+            all_t = [tkr] + peers + [cfg["market_index"]]
+
+            prices = cached_download(all_t, start=dl_start, end=dl_end, progress=False)
+            tp = prices[tkr].dropna()
+            pp = prices[[c for c in peers if c in prices.columns]].dropna()
+            tr = np.log(tp / tp.shift(1))
+            pr = np.log(pp / pp.shift(1))
+            pre_mask = tp.index < ds
+            common_i = tr[pre_mask].dropna().index.intersection(pr[pre_mask].dropna().index)
+
+            if len(common_i) < 20:
+                print(f"    x Insufficient pre-distress data ({len(common_i)} obs)")
+                continue
+
+            betas, alpha, r2 = estimate_pre_distress_betas(tr.loc[common_i], pr.loc[common_i])
+            d_mask = (tp.index >= ds) & (tp.index <= de)
+            recon = reconstruct_distress_prices(tp, pp, d_mask, ds)
+            recons[tkr] = recon
+
+            # Save reconstruction figure as PNG + optionally show inline
+            fig_recon = plot_reconstructed_prices(recon, ticker=tkr, show_graphs=False)
+            if save_output:
+                tkr_dir = get_stock_output_dir(tkr, config)
+                save_figure_to_output(fig_recon, tkr, "reconstruction", config)
+                gap_s = (recon.loc[d_mask, "actual"] / recon.loc[d_mask, "reconstructed"] - 1)
+                gap_mean = gap_s.mean() * 100 if d_mask.any() and len(gap_s) > 0 else None
+                pd.DataFrame([{"ticker": tkr, "r2": r2, "n_obs": len(common_i),
+                               "mean_gap_pct": gap_mean}]
+                            ).to_csv(tkr_dir / "reconstruction_summary.csv", index=False)
+            if show_graphs:
+                plt.show()
+            else:
+                plt.close(fig_recon)
+
+            var_comp = compute_var_comparison(
+                reconstructed=recon, peer_prices=pp, confidence=0.99, window=260,
+            )
+            # Save VaR comparison figure as PNG + optionally show inline
+            fig_var = plot_var_comparison(var_comp, ticker=tkr, show_graphs=False)
+            if save_output:
+                tkr_dir = get_stock_output_dir(tkr, config)
+                save_figure_to_output(fig_var, tkr, "var_comparison", config)
+                var_comp.to_csv(tkr_dir / "var_comparison.csv")
+            if show_graphs:
+                plt.show()
+            else:
+                plt.close(fig_var)
+
+            raw_prices = pd.DataFrame({tkr: recon["actual"]})
+            for p in pp.columns:
+                raw_prices[p] = pp[p]
+            recon_prices = raw_prices.copy()
+            recon_prices[tkr] = recon["combined"]
+            raw_returns = raw_prices.pct_change().dropna()
+            w = {c: 1.0 / len(raw_prices.columns) for c in raw_prices.columns}
+            raw_port_ret = sum(raw_returns[c] * w[c] for c in raw_returns.columns)
+            recon_returns = recon_prices.pct_change().dropna()
+            recon_port_ret = sum(recon_returns[c] * w[c] for c in recon_returns.columns)
+            ci = raw_port_ret.index.intersection(var_comp.index)
+            raw_v = var_comp.loc[ci, "VaR_raw"]
+            recon_v = var_comp.loc[ci, "VaR_reconstructed"]
+            breach_raw = (raw_port_ret.loc[ci] < raw_v).sum()
+            breach_recon = (recon_port_ret.loc[ci] < recon_v).sum()
+            rate_raw = breach_raw / len(ci) * 100
+            rate_recon = breach_recon / len(ci) * 100
+            print(f"    R2={r2:.3f}  Breaches: {breach_raw} -> {breach_recon}  "
+                  f"(rates: {rate_raw:.2f}% -> {rate_recon:.2f}%)")
+        except Exception as e:
+            print(f"    x Error: {str(e)[:80]}")
+            continue
+
+    # 4. Cross-validation
+    print(f"\n  -- Cross-Validation Breach Analysis --")
+    try:
+        cv_df = compute_cross_validation_breaches(
+            config=config, tickers=tickers, confidence=0.99, window=260,
+            show_graphs=show_graphs,
+        )
+        result["cv_df"] = cv_df
+        if save_output and not cv_df.empty:
+            cv_df.to_csv(output_root / "cross_validation_breaches.csv", index=False)
+        print(f"    v {len(cv_df)} stocks analyzed")
+    except Exception as e:
+        print(f"    x Cross-validation: {e}")
+
+    print(f"\n{'='*70}")
+    print("PIPELINE COMPLETE")
+    print('=' * 70)
+    print(f"  Output root:   {output_root}")
+    print(f"  Data dir:      {data_root}")
+    print(f"  Stocks done:   {len(recons)} / {len(tickers)}")
+    return result
+
+
+def main():
+    """Run the full pipeline as a standalone script."""
+    import argparse
+    parser = argparse.ArgumentParser(
+        description="Distressed Stock Price Reconstruction - Full Analysis Pipeline"
+    )
+    parser.add_argument("--config", "-c", type=str, default=None,
+                        help="Path to distressed_stocks.json")
+    parser.add_argument("--no-graphs", action="store_true",
+                        help="Disable matplotlib figure display")
+    parser.add_argument("--no-save", action="store_true",
+                        help="Disable file output to distress_output/")
+    args = parser.parse_args()
+
+    config = load_config(args.config) if args.config else None
+    run_full_pipeline(config=config, show_graphs=not args.no_graphs,
+                      save_output=not args.no_save)
+
+
+if __name__ == "__main__":
+    main()
