@@ -1592,6 +1592,22 @@ def compute_cross_validation_breaches(
             rate_raw = breach_raw / n_total * 100 if n_total > 0 else 0
             rate_recon = breach_recon / n_total * 100 if n_total > 0 else 0
 
+            # ── Accuracy: deviation from expected breach rate ────────────────
+            # A well-calibrated VaR model should breach at rate = 1-confidence.
+            # Accuracy = |observed - expected| — LOWER is better calibrated.
+            accuracy_raw  = abs(rate_raw - expected_rate)
+            accuracy_recon = abs(rate_recon - expected_rate)
+            accuracy_change = accuracy_recon - accuracy_raw  # negative = better
+
+            # ── Binomial test p-value (two-sided, vs expected rate) ──────────
+            # Tests H0: breach rate = expected rate (i.e., model is calibrated)
+            from scipy.stats import binomtest
+            if n_total > 0:
+                pval_raw = binomtest(breach_raw, n_total, p=expected_rate/100, alternative='two-sided').pvalue
+                pval_recon = binomtest(breach_recon, n_total, p=expected_rate/100, alternative='two-sided').pvalue
+            else:
+                pval_raw = pval_recon = 1.0
+
             results.append({
                 "Ticker": tkr,
                 "Name": cfg.get("name", ""),
@@ -1607,9 +1623,15 @@ def compute_cross_validation_breaches(
                 "Breaches After": int(breach_recon),
                 "Rate Before %": round(rate_raw, 2),
                 "Rate After %": round(rate_recon, 2),
-                "Breach Change": int(breach_recon - breach_raw),
                 "Expected Rate %": round(expected_rate, 1),
-                "Closer to Target": "After" if abs(rate_recon - expected_rate) < abs(rate_raw - expected_rate) else "Before",
+                "Breach Change": int(breach_recon - breach_raw),
+                "Accuracy Before": round(accuracy_raw, 3),
+                "Accuracy After": round(accuracy_recon, 3),
+                "Accuracy Change": round(accuracy_change, 3),
+                "P-Value Before": round(pval_raw, 4),
+                "P-Value After": round(pval_recon, 4),
+                # More accurate = lower deviation from expected rate
+                "More Accurate": "After" if accuracy_recon < accuracy_raw else ("Before" if accuracy_raw < accuracy_recon else "Same"),
             })
         except Exception as e:
             results.append({
@@ -1622,29 +1644,48 @@ def compute_cross_validation_breaches(
     if show_graphs and not df.empty:
         valid = df.dropna(subset=["Breaches Before", "Breaches After"])
         if len(valid) > 0:
-            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, max(5, len(valid) * 0.4)))
+            fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(20, max(5, len(valid) * 0.4)))
             y = np.arange(len(valid))
             h = 0.35
+
+            # Panel 1: Breach counts before vs after
             ax1.barh(y - h/2, valid["Breaches Before"].values, h, color="#e74c3c", alpha=0.85, label="Before reconstruction")
             ax1.barh(y + h/2, valid["Breaches After"].values, h, color="#27ae60", alpha=0.85, label="After reconstruction")
             ax1.set_yticks(y)
             ax1.set_yticklabels([f'{r["Ticker"]} ({r["Sector"][:12]})' for _, r in valid.iterrows()], fontsize=9)
             ax1.set_xlabel("VaR Breaches", fontsize=12, fontweight="bold")
-            ax1.set_title(f"VaR Breaches Before vs After Reconstruction ({window}d rolling, {int(confidence*100)}% CI)",
+            ax1.set_title(f"VaR Breaches Before vs After ({window}d rolling, {int(confidence*100)}% CI)",
                           fontsize=13, fontweight="bold")
             ax1.legend(loc="lower right", fontsize=10)
             ax1.grid(True, alpha=0.3, axis="x")
 
+            # Panel 2: Breach change
             ax2.barh(y, valid["Breach Change"].values, h/2,
                      color=["#e74c3c" if v > 0 else "#27ae60" for v in valid["Breach Change"].values],
                      alpha=0.8)
             ax2.axvline(x=0, color="black", linewidth=0.8)
             ax2.set_yticks(y)
             ax2.set_yticklabels([f'{r["Ticker"]} ({r["Sector"][:12]})' for _, r in valid.iterrows()], fontsize=9)
-            ax2.set_xlabel("Breach Change (After - Before)", fontsize=12, fontweight="bold")
-            ax2.set_title("Change in VaR Breaches (negative = improvement)",
+            ax2.set_xlabel("Breach Change (After − Before)", fontsize=12, fontweight="bold")
+            ax2.set_title("Change in VaR Breaches (negative = fewer breaches)",
                           fontsize=13, fontweight="bold")
             ax2.grid(True, alpha=0.3, axis="x")
+
+            # Panel 3: Accuracy — deviation from expected breach rate (%)
+            # Lower deviation = better calibrated. Expected line at 0.
+            ax3.barh(y - h/2, valid["Accuracy Before"].values, h, color="#e74c3c", alpha=0.85,
+                     label="Before (raw prices)")
+            ax3.barh(y + h/2, valid["Accuracy After"].values, h, color="#27ae60", alpha=0.85,
+                     label="After (reconstructed)")
+            expected_rate_line = (1 - confidence) * 100
+            ax3.axvline(x=0, color="black", linewidth=0.8)
+            ax3.set_yticks(y)
+            ax3.set_yticklabels([f'{r["Ticker"]} ({r["Sector"][:12]})' for _, r in valid.iterrows()], fontsize=9)
+            ax3.set_xlabel(f"|Observed − Expected| (target: {expected_rate_line:.0f}%)", fontsize=12, fontweight="bold")
+            ax3.set_title("VaR Accuracy: Deviation from Expected Breach Rate\n(lower = better calibrated)",
+                          fontsize=13, fontweight="bold")
+            ax3.legend(loc="lower right", fontsize=10)
+            ax3.grid(True, alpha=0.3, axis="x")
 
             fig.tight_layout()
             plt.show()
@@ -1656,10 +1697,175 @@ def compute_cross_validation_breaches(
 # MAIN (for standalone testing)
 # ══════════════════════════════════════════════════════════════════════════════
 
-if __name__ == "__main__":
-    print("distress_analysis.py — backend module loaded successfully.")
-    config = load_config()
-    tickers = list_distressed_tickers(config)
-    print(f"  Config loaded: {len(tickers)} distressed stocks defined.")
-    print(f"  Tickers: {', '.join(tickers)}")
-    print(f"  Data cache: {_DEFAULT_DATA_DIR.resolve()}")
+# ══════════════════════════════════════════════════════════════════════════════
+# 12. SOURCE MAPPING — Cross-vendor ticker mapping for Reuters & Bloomberg
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Built-in name map for peers & market indices not in the config's "name" field
+# This is maintained here so it can be reused across notebooks and mappings.
+_BUILTIN_NAME_MAP: Dict[str, str] = {
+    # ── Energy ───────────────────────────────────────────────────────────────
+    "XOM": "Exxon Mobil Corporation", "CVX": "Chevron Corporation",
+    "COP": "ConocoPhillips", "EOG": "EOG Resources, Inc.",
+    "SLB": "Schlumberger Limited", "HAL": "Halliburton Company",
+    "BKR": "Baker Hughes Company", "NOV": "NOV Inc.",
+    "BP": "BP p.l.c.", "SHEL": "Shell plc", "TTE": "TotalEnergies SE",
+    # ── Consumer ─────────────────────────────────────────────────────────────
+    "M": "Macy's Inc.", "KSS": "Kohl's Corporation", "JWN": "Nordstrom, Inc.",
+    "TGT": "Target Corporation", "WMT": "Walmart Inc.", "DDS": "Dillard's, Inc.",
+    "AEO": "American Eagle Outfitters, Inc.", "ANF": "Abercrombie & Fitch Co.",
+    "ROST": "Ross Stores, Inc.", "TJX": "The TJX Companies, Inc.",
+    "KMX": "CarMax, Inc.", "AN": "AutoNation, Inc.", "PAG": "Penske Automotive Group, Inc.",
+    "GPII": "Group 1 Automotive, Inc.",
+    # ── Airlines ─────────────────────────────────────────────────────────────
+    "DAL": "Delta Air Lines, Inc.", "UAL": "United Airlines Holdings, Inc.",
+    "LUV": "Southwest Airlines Co.", "AAL": "American Airlines Group Inc.",
+    "ALK": "Alaska Air Group, Inc.", "JBLU": "JetBlue Airways Corporation",
+    "AF.PA": "Air France-KLM SA", "ICAGY": "International Consolidated Airlines Group SA",
+    # ── Technology ───────────────────────────────────────────────────────────
+    "AMD": "Advanced Micro Devices, Inc.", "NVDA": "NVIDIA Corporation",
+    "QCOM": "QUALCOMM Incorporated", "MRVL": "Marvell Technology, Inc.",
+    "TSM": "Taiwan Semiconductor Manufacturing Company Limited",
+    "STM": "STMicroelectronics N.V.", "IFNNY": "Infineon Technologies AG",
+    "CAP.PA": "Capgemini SE", "SOP.PA": "Sopra Steria Group SA",
+    "INFY": "Infosys Limited", "WIT": "Wipro Limited",
+    "ACN": "Accenture plc", "CTSH": "Cognizant Technology Solutions Corporation",
+    # ── Market Indices ───────────────────────────────────────────────────────
+    "^GSPC": "S&P 500 Index", "^FCHI": "CAC 40 Index",
+    "^GDAXI": "DAX Index", "^FTSE": "FTSE 100 Index",
+    "FTSEMIB.MI": "FTSE MIB Index", "^SMSI": "IBEX 35 Index",
+    "^SSMI": "Swiss Market Index", "^AEX": "AEX Index",
+    "^N225": "Nikkei 225 Index", "^KS11": "KOSPI Composite Index",
+    "^TWII": "Taiwan Weighted Index", "^NSEI": "Nifty 50 Index",
+    "^AXJO": "ASX 200 Index", "^GSPTSE": "S&P/TSX Composite Index",
+    "^BVSP": "Bovespa Index", "^MXX": "IPC Mexico Index",
+    "^HSI": "Hang Seng Index",
+    # ── Sector ETFs ──────────────────────────────────────────────────────────
+    "XLE": "Energy Select Sector SPDR Fund", "SPY": "SPDR S&P 500 ETF Trust",
+    "XLF": "Financial Select Sector SPDR Fund", "XLK": "Technology Select Sector SPDR Fund",
+    "XLY": "Consumer Discretionary Select Sector SPDR Fund",
+    "XLI": "Industrial Select Sector SPDR Fund",
+    # ── Common Healthy Stocks (scan controls) ────────────────────────────────
+    "AAPL": "Apple Inc.", "MSFT": "Microsoft Corporation",
+    "JNJ": "Johnson & Johnson", "JPM": "JPMorgan Chase & Co.",
+    "KO": "The Coca-Cola Company", "PG": "The Procter & Gamble Company",
+}
+
+
+def build_source_mapping(
+    config: Optional[dict] = None,
+    output_path: Optional[Union[str, Path]] = None,
+) -> pd.DataFrame:
+    """Build a cross-vendor ticker mapping for all entities in the config.
+
+    Collects every ticker referenced in the distressed stocks config
+    (distressed stocks, their peers, and market indices), attaches the
+    known company/index name from the config or built-in name map, and
+    provides empty columns for Reuters RIC and Bloomberg ticker to be
+    filled in manually or programmatically.
+
+    Parameters
+    ----------
+    config : dict, optional
+        Pre-loaded config. If None, loads from default path.
+    output_path : str or Path, optional
+        If provided, writes the mapping to a JSON file.
+        Defaults to ``source_config.json`` next to the config file.
+
+    Returns
+    -------
+    pd.DataFrame with columns:
+        yahoo_ticker, name, type, used_by, used_by_count,
+        reuters_ric, bloomberg_ticker, bloomberg_name,
+        isin, sedol, cusip
+    """
+    if config is None:
+        config = load_config()
+
+    stocks = config.get("stocks", {})
+
+    # ── Collect all tickers with their roles ──────────────────────────────────
+    # id -> {"name": ..., "type": ..., "used_by": set()}
+    registry: Dict[str, Dict[str, Any]] = {}
+
+    for tkr, cfg in stocks.items():
+        # The distressed stock itself
+        if tkr not in registry:
+            registry[tkr] = {"name": cfg.get("name", ""), "type": "Distressed Stock", "used_by": set()}
+        registry[tkr]["used_by"].add(tkr)
+
+        # Peers
+        for peer in cfg.get("peers", []):
+            if peer not in registry:
+                registry[peer] = {"name": _BUILTIN_NAME_MAP.get(peer, ""), "type": "Peer", "used_by": set()}
+            registry[peer]["used_by"].add(tkr)
+
+        # Market index
+        idx = cfg.get("market_index", "")
+        if idx and idx not in registry:
+            registry[idx] = {"name": _BUILTIN_NAME_MAP.get(idx, idx), "type": "Market Index", "used_by": set()}
+        if idx:
+            registry[idx]["used_by"].add(tkr)
+
+    # ── Build DataFrame ──────────────────────────────────────────────────────
+    rows = []
+    for tkr, info in sorted(registry.items()):
+        used_list = sorted(info["used_by"])
+        rows.append({
+            "yahoo_ticker": tkr,
+            "name": info["name"] or "",
+            "type": info["type"],
+            "used_by": ", ".join(used_list),
+            "used_by_count": len(used_list),
+            "reuters_ric": "",
+            "bloomberg_ticker": "",
+            "bloomberg_name": "",
+            "isin": "",
+            "sedol": "",
+            "cusip": "",
+        })
+
+    df = pd.DataFrame(rows)
+
+    # ── Write JSON ───────────────────────────────────────────────────────────
+    if output_path is None:
+        output_path = _DEFAULT_CONFIG_PATH.parent / "source_config.json"
+    else:
+        output_path = Path(output_path)
+
+    payload = {
+        "_description": (
+            "Cross-vendor ticker mapping for distressed stocks, peers, and market indices. "
+            "Yahoo Finance tickers are the primary key. "
+            "Fill in reuters_ric, bloomberg_ticker, isin, etc. for each entity."
+        ),
+        "_version": "1.0",
+        "_generated_by": "build_source_mapping() in distress_analysis.py",
+        "_total_entities": len(df),
+        "_breakdown": {
+            "Distressed Stock": int((df["type"] == "Distressed Stock").sum()),
+            "Peer": int((df["type"] == "Peer").sum()),
+            "Market Index": int((df["type"] == "Market Index").sum()),
+        },
+        "entities": [
+            {
+                "yahoo_ticker": r["yahoo_ticker"],
+                "name": r["name"] or None,
+                "type": r["type"],
+                "used_by": r["used_by"].split(", ") if r["used_by"] else [],
+                "reuters_ric": r["reuters_ric"] or None,
+                "bloomberg_ticker": r["bloomberg_ticker"] or None,
+                "bloomberg_name": r["bloomberg_name"] or None,
+                "isin": r["isin"] or None,
+                "sedol": r["sedol"] or None,
+                "cusip": r["cusip"] or None,
+            }
+            for _, r in df.iterrows()
+        ],
+    }
+
+    with open(output_path, "w") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+
+    logger.info("Source mapping written to %s (%d entities)", output_path, len(df))
+    return df
