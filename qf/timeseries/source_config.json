@@ -1,0 +1,813 @@
+{
+  "_description": "Cross-vendor ticker mapping for distressed stocks, peers, and market indices. Yahoo Finance tickers are the primary key. Fill in reuters_ric, bloomberg_ticker, isin, etc. for each entity.",
+  "_version": "1.0",
+  "_generated_by": "build_source_mapping() in distress_analysis.py",
+  "_total_entities": 54,
+  "_breakdown": {
+    "Distressed Stock": 12,
+    "Peer": 40,
+    "Market Index": 2
+  },
+  "entities": [
+    {
+      "yahoo_ticker": "AAL",
+      "name": "American Airlines Group Inc.",
+      "type": "Peer",
+      "used_by": [
+        "AAL",
+        "UAL"
+      ],
+      "reuters_ric": null,
+      "bloomberg_ticker": null,
+      "bloomberg_name": null,
+      "isin": null,
+      "sedol": null,
+      "cusip": null
+    },
+    {
+      "yahoo_ticker": "ACN",
+      "name": "Accenture plc",
+      "type": "Peer",
+      "used_by": [
+        "ATO.PA"
+      ],
+      "reuters_ric": null,
+      "bloomberg_ticker": null,
+      "bloomberg_name": null,
+      "isin": null,
+      "sedol": null,
+      "cusip": null
+    },
+    {
+      "yahoo_ticker": "AEO",
+      "name": "American Eagle Outfitters, Inc.",
+      "type": "Peer",
+      "used_by": [
+        "GPS"
+      ],
+      "reuters_ric": null,
+      "bloomberg_ticker": null,
+      "bloomberg_name": null,
+      "isin": null,
+      "sedol": null,
+      "cusip": null
+    },
+    {
+      "yahoo_ticker": "ALK",
+      "name": "Alaska Air Group, Inc.",
+      "type": "Peer",
+      "used_by": [
+        "DAL"
+      ],
+      "reuters_ric": null,
+      "bloomberg_ticker": null,
+      "bloomberg_name": null,
+      "isin": null,
+      "sedol": null,
+      "cusip": null
+    },
+    {
+      "yahoo_ticker": "AMD",
+      "name": "Advanced Micro Devices, Inc.",
+      "type": "Peer",
+      "used_by": [
+        "INTC"
+      ],
+      "reuters_ric": null,
+      "bloomberg_ticker": null,
+      "bloomberg_name": null,
+      "isin": null,
+      "sedol": null,
+      "cusip": null
+    },
+    {
+      "yahoo_ticker": "AN",
+      "name": "AutoNation, Inc.",
+      "type": "Peer",
+      "used_by": [
+        "CVNA"
+      ],
+      "reuters_ric": null,
+      "bloomberg_ticker": null,
+      "bloomberg_name": null,
+      "isin": null,
+      "sedol": null,
+      "cusip": null
+    },
+    {
+      "yahoo_ticker": "ANF",
+      "name": "Abercrombie & Fitch Co.",
+      "type": "Peer",
+      "used_by": [
+        "GPS"
+      ],
+      "reuters_ric": null,
+      "bloomberg_ticker": null,
+      "bloomberg_name": null,
+      "isin": null,
+      "sedol": null,
+      "cusip": null
+    },
+    {
+      "yahoo_ticker": "ATO.PA",
+      "name": "Atos SE",
+      "type": "Distressed Stock",
+      "used_by": [
+        "ATO.PA"
+      ],
+      "reuters_ric": null,
+      "bloomberg_ticker": null,
+      "bloomberg_name": null,
+      "isin": null,
+      "sedol": null,
+      "cusip": null
+    },
+    {
+      "yahoo_ticker": "BAC",
+      "name": null,
+      "type": "Peer",
+      "used_by": [
+        "SIVBQ"
+      ],
+      "reuters_ric": null,
+      "bloomberg_ticker": null,
+      "bloomberg_name": null,
+      "isin": null,
+      "sedol": null,
+      "cusip": null
+    },
+    {
+      "yahoo_ticker": "BKR",
+      "name": "Baker Hughes Company",
+      "type": "Peer",
+      "used_by": [
+        "HP",
+        "PTEN",
+        "RIG"
+      ],
+      "reuters_ric": null,
+      "bloomberg_ticker": null,
+      "bloomberg_name": null,
+      "isin": null,
+      "sedol": null,
+      "cusip": null
+    },
+    {
+      "yahoo_ticker": "C",
+      "name": null,
+      "type": "Peer",
+      "used_by": [
+        "SIVBQ"
+      ],
+      "reuters_ric": null,
+      "bloomberg_ticker": null,
+      "bloomberg_name": null,
+      "isin": null,
+      "sedol": null,
+      "cusip": null
+    },
+    {
+      "yahoo_ticker": "CAP.PA",
+      "name": "Capgemini SE",
+      "type": "Peer",
+      "used_by": [
+        "ATO.PA"
+      ],
+      "reuters_ric": null,
+      "bloomberg_ticker": null,
+      "bloomberg_name": null,
+      "isin": null,
+      "sedol": null,
+      "cusip": null
+    },
+    {
+      "yahoo_ticker": "COP",
+      "name": "ConocoPhillips",
+      "type": "Peer",
+      "used_by": [
+        "OXY",
+        "WTI"
+      ],
+      "reuters_ric": null,
+      "bloomberg_ticker": null,
+      "bloomberg_name": null,
+      "isin": null,
+      "sedol": null,
+      "cusip": null
+    },
+    {
+      "yahoo_ticker": "CTSH",
+      "name": "Cognizant Technology Solutions Corporation",
+      "type": "Peer",
+      "used_by": [
+        "ATO.PA"
+      ],
+      "reuters_ric": null,
+      "bloomberg_ticker": null,
+      "bloomberg_name": null,
+      "isin": null,
+      "sedol": null,
+      "cusip": null
+    },
+    {
+      "yahoo_ticker": "CVNA",
+      "name": "Carvana Co.",
+      "type": "Distressed Stock",
+      "used_by": [
+        "CVNA"
+      ],
+      "reuters_ric": null,
+      "bloomberg_ticker": null,
+      "bloomberg_name": null,
+      "isin": null,
+      "sedol": null,
+      "cusip": null
+    },
+    {
+      "yahoo_ticker": "CVX",
+      "name": "Chevron Corporation",
+      "type": "Peer",
+      "used_by": [
+        "OXY"
+      ],
+      "reuters_ric": null,
+      "bloomberg_ticker": null,
+      "bloomberg_name": null,
+      "isin": null,
+      "sedol": null,
+      "cusip": null
+    },
+    {
+      "yahoo_ticker": "DAL",
+      "name": "Delta Air Lines Inc.",
+      "type": "Distressed Stock",
+      "used_by": [
+        "AAL",
+        "DAL",
+        "UAL"
+      ],
+      "reuters_ric": null,
+      "bloomberg_ticker": null,
+      "bloomberg_name": null,
+      "isin": null,
+      "sedol": null,
+      "cusip": null
+    },
+    {
+      "yahoo_ticker": "DDS",
+      "name": "Dillard's, Inc.",
+      "type": "Peer",
+      "used_by": [
+        "JWN"
+      ],
+      "reuters_ric": null,
+      "bloomberg_ticker": null,
+      "bloomberg_name": null,
+      "isin": null,
+      "sedol": null,
+      "cusip": null
+    },
+    {
+      "yahoo_ticker": "EOG",
+      "name": "EOG Resources, Inc.",
+      "type": "Peer",
+      "used_by": [
+        "OXY",
+        "WTI"
+      ],
+      "reuters_ric": null,
+      "bloomberg_ticker": null,
+      "bloomberg_name": null,
+      "isin": null,
+      "sedol": null,
+      "cusip": null
+    },
+    {
+      "yahoo_ticker": "GPII",
+      "name": "Group 1 Automotive, Inc.",
+      "type": "Peer",
+      "used_by": [
+        "CVNA"
+      ],
+      "reuters_ric": null,
+      "bloomberg_ticker": null,
+      "bloomberg_name": null,
+      "isin": null,
+      "sedol": null,
+      "cusip": null
+    },
+    {
+      "yahoo_ticker": "GPS",
+      "name": "Gap Inc.",
+      "type": "Distressed Stock",
+      "used_by": [
+        "GPS"
+      ],
+      "reuters_ric": null,
+      "bloomberg_ticker": null,
+      "bloomberg_name": null,
+      "isin": null,
+      "sedol": null,
+      "cusip": null
+    },
+    {
+      "yahoo_ticker": "GS",
+      "name": null,
+      "type": "Peer",
+      "used_by": [
+        "SIVBQ"
+      ],
+      "reuters_ric": null,
+      "bloomberg_ticker": null,
+      "bloomberg_name": null,
+      "isin": null,
+      "sedol": null,
+      "cusip": null
+    },
+    {
+      "yahoo_ticker": "HAL",
+      "name": "Halliburton Company",
+      "type": "Peer",
+      "used_by": [
+        "HP",
+        "PTEN",
+        "RIG"
+      ],
+      "reuters_ric": null,
+      "bloomberg_ticker": null,
+      "bloomberg_name": null,
+      "isin": null,
+      "sedol": null,
+      "cusip": null
+    },
+    {
+      "yahoo_ticker": "HP",
+      "name": "Helmerich & Payne Inc.",
+      "type": "Distressed Stock",
+      "used_by": [
+        "HP"
+      ],
+      "reuters_ric": null,
+      "bloomberg_ticker": null,
+      "bloomberg_name": null,
+      "isin": null,
+      "sedol": null,
+      "cusip": null
+    },
+    {
+      "yahoo_ticker": "INFY",
+      "name": "Infosys Limited",
+      "type": "Peer",
+      "used_by": [
+        "ATO.PA"
+      ],
+      "reuters_ric": null,
+      "bloomberg_ticker": null,
+      "bloomberg_name": null,
+      "isin": null,
+      "sedol": null,
+      "cusip": null
+    },
+    {
+      "yahoo_ticker": "INTC",
+      "name": "Intel Corp.",
+      "type": "Distressed Stock",
+      "used_by": [
+        "INTC"
+      ],
+      "reuters_ric": null,
+      "bloomberg_ticker": null,
+      "bloomberg_name": null,
+      "isin": null,
+      "sedol": null,
+      "cusip": null
+    },
+    {
+      "yahoo_ticker": "JBLU",
+      "name": "JetBlue Airways Corporation",
+      "type": "Peer",
+      "used_by": [
+        "AAL",
+        "DAL",
+        "UAL"
+      ],
+      "reuters_ric": null,
+      "bloomberg_ticker": null,
+      "bloomberg_name": null,
+      "isin": null,
+      "sedol": null,
+      "cusip": null
+    },
+    {
+      "yahoo_ticker": "JPM",
+      "name": "JPMorgan Chase & Co.",
+      "type": "Peer",
+      "used_by": [
+        "SIVBQ"
+      ],
+      "reuters_ric": null,
+      "bloomberg_ticker": null,
+      "bloomberg_name": null,
+      "isin": null,
+      "sedol": null,
+      "cusip": null
+    },
+    {
+      "yahoo_ticker": "JWN",
+      "name": "Nordstrom, Inc.",
+      "type": "Peer",
+      "used_by": [
+        "JWN",
+        "KSS",
+        "M"
+      ],
+      "reuters_ric": null,
+      "bloomberg_ticker": null,
+      "bloomberg_name": null,
+      "isin": null,
+      "sedol": null,
+      "cusip": null
+    },
+    {
+      "yahoo_ticker": "KMX",
+      "name": "CarMax, Inc.",
+      "type": "Peer",
+      "used_by": [
+        "CVNA"
+      ],
+      "reuters_ric": null,
+      "bloomberg_ticker": null,
+      "bloomberg_name": null,
+      "isin": null,
+      "sedol": null,
+      "cusip": null
+    },
+    {
+      "yahoo_ticker": "KSS",
+      "name": "Kohl's Corporation",
+      "type": "Peer",
+      "used_by": [
+        "JWN",
+        "KSS",
+        "M"
+      ],
+      "reuters_ric": null,
+      "bloomberg_ticker": null,
+      "bloomberg_name": null,
+      "isin": null,
+      "sedol": null,
+      "cusip": null
+    },
+    {
+      "yahoo_ticker": "LUV",
+      "name": "Southwest Airlines Co.",
+      "type": "Peer",
+      "used_by": [
+        "AAL",
+        "DAL",
+        "UAL"
+      ],
+      "reuters_ric": null,
+      "bloomberg_ticker": null,
+      "bloomberg_name": null,
+      "isin": null,
+      "sedol": null,
+      "cusip": null
+    },
+    {
+      "yahoo_ticker": "M",
+      "name": "Macy's Inc.",
+      "type": "Distressed Stock",
+      "used_by": [
+        "JWN",
+        "KSS",
+        "M"
+      ],
+      "reuters_ric": null,
+      "bloomberg_ticker": null,
+      "bloomberg_name": null,
+      "isin": null,
+      "sedol": null,
+      "cusip": null
+    },
+    {
+      "yahoo_ticker": "MRVL",
+      "name": "Marvell Technology, Inc.",
+      "type": "Peer",
+      "used_by": [
+        "INTC"
+      ],
+      "reuters_ric": null,
+      "bloomberg_ticker": null,
+      "bloomberg_name": null,
+      "isin": null,
+      "sedol": null,
+      "cusip": null
+    },
+    {
+      "yahoo_ticker": "NOV",
+      "name": "NOV Inc.",
+      "type": "Peer",
+      "used_by": [
+        "HP",
+        "PTEN",
+        "RIG"
+      ],
+      "reuters_ric": null,
+      "bloomberg_ticker": null,
+      "bloomberg_name": null,
+      "isin": null,
+      "sedol": null,
+      "cusip": null
+    },
+    {
+      "yahoo_ticker": "NVDA",
+      "name": "NVIDIA Corporation",
+      "type": "Peer",
+      "used_by": [
+        "INTC"
+      ],
+      "reuters_ric": null,
+      "bloomberg_ticker": null,
+      "bloomberg_name": null,
+      "isin": null,
+      "sedol": null,
+      "cusip": null
+    },
+    {
+      "yahoo_ticker": "OXY",
+      "name": "Occidental Petroleum Corp.",
+      "type": "Distressed Stock",
+      "used_by": [
+        "OXY",
+        "WTI"
+      ],
+      "reuters_ric": null,
+      "bloomberg_ticker": null,
+      "bloomberg_name": null,
+      "isin": null,
+      "sedol": null,
+      "cusip": null
+    },
+    {
+      "yahoo_ticker": "PAG",
+      "name": "Penske Automotive Group, Inc.",
+      "type": "Peer",
+      "used_by": [
+        "CVNA"
+      ],
+      "reuters_ric": null,
+      "bloomberg_ticker": null,
+      "bloomberg_name": null,
+      "isin": null,
+      "sedol": null,
+      "cusip": null
+    },
+    {
+      "yahoo_ticker": "PTEN",
+      "name": "Patterson-UTI Energy Inc.",
+      "type": "Distressed Stock",
+      "used_by": [
+        "PTEN"
+      ],
+      "reuters_ric": null,
+      "bloomberg_ticker": null,
+      "bloomberg_name": null,
+      "isin": null,
+      "sedol": null,
+      "cusip": null
+    },
+    {
+      "yahoo_ticker": "QCOM",
+      "name": "QUALCOMM Incorporated",
+      "type": "Peer",
+      "used_by": [
+        "INTC"
+      ],
+      "reuters_ric": null,
+      "bloomberg_ticker": null,
+      "bloomberg_name": null,
+      "isin": null,
+      "sedol": null,
+      "cusip": null
+    },
+    {
+      "yahoo_ticker": "RIG",
+      "name": "Transocean Ltd.",
+      "type": "Distressed Stock",
+      "used_by": [
+        "RIG"
+      ],
+      "reuters_ric": null,
+      "bloomberg_ticker": null,
+      "bloomberg_name": null,
+      "isin": null,
+      "sedol": null,
+      "cusip": null
+    },
+    {
+      "yahoo_ticker": "ROST",
+      "name": "Ross Stores, Inc.",
+      "type": "Peer",
+      "used_by": [
+        "GPS",
+        "KSS"
+      ],
+      "reuters_ric": null,
+      "bloomberg_ticker": null,
+      "bloomberg_name": null,
+      "isin": null,
+      "sedol": null,
+      "cusip": null
+    },
+    {
+      "yahoo_ticker": "SIVBQ",
+      "name": "SVB Financial Group (Silicon Valley Bank)",
+      "type": "Distressed Stock",
+      "used_by": [
+        "SIVBQ"
+      ],
+      "reuters_ric": null,
+      "bloomberg_ticker": null,
+      "bloomberg_name": null,
+      "isin": null,
+      "sedol": null,
+      "cusip": null
+    },
+    {
+      "yahoo_ticker": "SLB",
+      "name": "Schlumberger Limited",
+      "type": "Peer",
+      "used_by": [
+        "HP",
+        "PTEN",
+        "RIG"
+      ],
+      "reuters_ric": null,
+      "bloomberg_ticker": null,
+      "bloomberg_name": null,
+      "isin": null,
+      "sedol": null,
+      "cusip": null
+    },
+    {
+      "yahoo_ticker": "SOP.PA",
+      "name": "Sopra Steria Group SA",
+      "type": "Peer",
+      "used_by": [
+        "ATO.PA"
+      ],
+      "reuters_ric": null,
+      "bloomberg_ticker": null,
+      "bloomberg_name": null,
+      "isin": null,
+      "sedol": null,
+      "cusip": null
+    },
+    {
+      "yahoo_ticker": "TGT",
+      "name": "Target Corporation",
+      "type": "Peer",
+      "used_by": [
+        "JWN",
+        "KSS",
+        "M"
+      ],
+      "reuters_ric": null,
+      "bloomberg_ticker": null,
+      "bloomberg_name": null,
+      "isin": null,
+      "sedol": null,
+      "cusip": null
+    },
+    {
+      "yahoo_ticker": "TJX",
+      "name": "The TJX Companies, Inc.",
+      "type": "Peer",
+      "used_by": [
+        "GPS"
+      ],
+      "reuters_ric": null,
+      "bloomberg_ticker": null,
+      "bloomberg_name": null,
+      "isin": null,
+      "sedol": null,
+      "cusip": null
+    },
+    {
+      "yahoo_ticker": "UAL",
+      "name": "United Airlines Holdings, Inc.",
+      "type": "Peer",
+      "used_by": [
+        "AAL",
+        "DAL",
+        "UAL"
+      ],
+      "reuters_ric": null,
+      "bloomberg_ticker": null,
+      "bloomberg_name": null,
+      "isin": null,
+      "sedol": null,
+      "cusip": null
+    },
+    {
+      "yahoo_ticker": "WIT",
+      "name": "Wipro Limited",
+      "type": "Peer",
+      "used_by": [
+        "ATO.PA"
+      ],
+      "reuters_ric": null,
+      "bloomberg_ticker": null,
+      "bloomberg_name": null,
+      "isin": null,
+      "sedol": null,
+      "cusip": null
+    },
+    {
+      "yahoo_ticker": "WMT",
+      "name": "Walmart Inc.",
+      "type": "Peer",
+      "used_by": [
+        "M"
+      ],
+      "reuters_ric": null,
+      "bloomberg_ticker": null,
+      "bloomberg_name": null,
+      "isin": null,
+      "sedol": null,
+      "cusip": null
+    },
+    {
+      "yahoo_ticker": "WTI",
+      "name": "W&T Offshore Inc.",
+      "type": "Distressed Stock",
+      "used_by": [
+        "WTI"
+      ],
+      "reuters_ric": null,
+      "bloomberg_ticker": null,
+      "bloomberg_name": null,
+      "isin": null,
+      "sedol": null,
+      "cusip": null
+    },
+    {
+      "yahoo_ticker": "XOM",
+      "name": "Exxon Mobil Corporation",
+      "type": "Peer",
+      "used_by": [
+        "OXY",
+        "WTI"
+      ],
+      "reuters_ric": null,
+      "bloomberg_ticker": null,
+      "bloomberg_name": null,
+      "isin": null,
+      "sedol": null,
+      "cusip": null
+    },
+    {
+      "yahoo_ticker": "^FCHI",
+      "name": "CAC 40 Index",
+      "type": "Market Index",
+      "used_by": [
+        "ATO.PA"
+      ],
+      "reuters_ric": null,
+      "bloomberg_ticker": null,
+      "bloomberg_name": null,
+      "isin": null,
+      "sedol": null,
+      "cusip": null
+    },
+    {
+      "yahoo_ticker": "^GSPC",
+      "name": "S&P 500 Index",
+      "type": "Market Index",
+      "used_by": [
+        "AAL",
+        "CVNA",
+        "DAL",
+        "GPS",
+        "HP",
+        "INTC",
+        "JWN",
+        "KSS",
+        "M",
+        "OXY",
+        "PTEN",
+        "RIG",
+        "SIVBQ",
+        "UAL",
+        "WTI"
+      ],
+      "reuters_ric": null,
+      "bloomberg_ticker": null,
+      "bloomberg_name": null,
+      "isin": null,
+      "sedol": null,
+      "cusip": null
+    }
+  ]
+}

@@ -1,0 +1,79 @@
+{
+  "meta": {
+    "description": "Default configuration for the Gap-Filling Time-Series Reconstruction Pipeline (gap_filling.py)",
+    "version": "1.0.0",
+    "created": "2026-06-09"
+  },
+
+  "data": {
+    "data_dir": null,
+    "output_dir": null,
+    "n_days": 500,
+    "min_peer_history_days": 120,
+    "min_peer_coverage": 0.85,
+    "max_model_peers": 25,
+    "include_cross_sector": false
+  },
+
+  "peers": {
+    "lookback": 80,
+    "cluster_thr": 0.35,
+    "max_peers": 10,
+    "min_peers": 5
+  },
+
+  "distress": {
+    "dist_depth": 0.35,
+    "dist_length": 30,
+    "dist_start_date": null,
+    "dist_end_date": null
+  },
+
+  "sweep": {
+    "run_sweep": true,
+    "lookback_grid": [40, 60, 80, 120],
+    "threshold_grid": [0.25, 0.35, 0.45, 0.55],
+    "n_iter_enhanced": 50,
+    "random_state": 42
+  },
+
+  "models": {
+    "elastic_net": {
+      "l1_ratio": 0.5,
+      "use_cv": true,
+      "alpha": 1.0
+    },
+    "gpr": {
+      "kernel_type": "rbf",
+      "n_restarts": 10
+    },
+    "kalman": {
+      "process_noise": 0.0001,
+      "max_peers": 5
+    }
+  },
+
+  "drift_correction": {
+    "enabled": true,
+    "method": "all",
+    "kalman_process_variance": 0.001,
+    "cusum_delta": 0.2,
+    "cusum_threshold": 5.0
+  },
+
+  "backtest": {
+    "mean_reversion_lookback": 5,
+    "mean_reversion_threshold": 0.01
+  },
+
+  "plotting": {
+    "dpi": 150,
+    "figure_size": [14, 5],
+    "font_size": 11
+  },
+
+  "paths": {
+    "result_path_env_var": "RESULT_PATH",
+    "result_path_default": "./results"
+  }
+}

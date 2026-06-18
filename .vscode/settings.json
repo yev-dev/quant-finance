@@ -14,8 +14,115 @@
         "**/.hg": true,
         "**/CVS": true,
         "**/.DS_Store": true,
-        "**/*.pyc": {"when": "$(basename).py"}, 
+        "**/*.pyc": {"when": "$(basename).py"},
         "**/__pycache__": true,
         "**/*.egg-info": true
+    },
+    "python-envs.pythonProjects": [
+        {
+            "path": ".",
+            "envManager": "ms-python.python:conda",
+            "packageManager": "ms-python.python:conda"
+        }
+    ],
+    "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
+    "python.terminal.activateEnvironment": true,
+    "python.terminal.activateEnvInCurrentTerminal": true,
+    "[python]": {
+        "editor.formatOnSave": true,
+        "editor.defaultFormatter": "ms-python.python"
+    },
+    "launch": {
+        "configurations": [
+            {
+                "name": "Gap-Filling: MSFT (default)",
+                "type": "python",
+                "request": "launch",
+                "module": "qf.timeseries.gap_filling",
+                "cwd": "${workspaceFolder}",
+                "args": [
+                    "--target", "MSFT",
+                    "--data-dir", "qf/timeseries/notebooks/data",
+                    "--output-dir", "results/msft_default"
+                ],
+                "env": {
+                    "PYTHONPATH": "${workspaceFolder}"
+                },
+                "justMyCode": true
+            },
+            {
+                "name": "Gap-Filling: ACGL (Insurance)",
+                "type": "python",
+                "request": "launch",
+                "module": "qf.timeseries.gap_filling",
+                "cwd": "${workspaceFolder}",
+                "args": [
+                    "--target", "ACGL",
+                    "--data-dir", "qf/timeseries/notebooks/data",
+                    "--output-dir", "results/acgl_insurance",
+                    "--lookback", "120",
+                    "--threshold", "0.30",
+                    "--max-peers", "8"
+                ],
+                "env": {
+                    "PYTHONPATH": "${workspaceFolder}"
+                },
+                "justMyCode": true
+            },
+            {
+                "name": "Gap-Filling: ALL sectors",
+                "type": "python",
+                "request": "launch",
+                "module": "qf.timeseries.gap_filling",
+                "cwd": "${workspaceFolder}",
+                "args": [
+                    "--target", "ALL",
+                    "--data-dir", "qf/timeseries/notebooks/data",
+                    "--output-dir", "results/all_sectors",
+                    "--no-sweep"
+                ],
+                "env": {
+                    "PYTHONPATH": "${workspaceFolder}"
+                },
+                "justMyCode": true
+            },
+            {
+                "name": "Gap-Filling: MSFT + sweep + long distress",
+                "type": "python",
+                "request": "launch",
+                "module": "qf.timeseries.gap_filling",
+                "cwd": "${workspaceFolder}",
+                "args": [
+                    "--target", "MSFT",
+                    "--data-dir", "qf/timeseries/notebooks/data",
+                    "--output-dir", "results/msft_sweep_45d",
+                    "--dist-length", "45",
+                    "--dist-depth", "0.50",
+                    "--lookback", "100",
+                    "--threshold", "0.40"
+                ],
+                "env": {
+                    "PYTHONPATH": "${workspaceFolder}"
+                },
+                "justMyCode": true
+            },
+            {
+                "name": "Gap-Filling: custom (edit args here)",
+                "type": "python",
+                "request": "launch",
+                "module": "qf.timeseries.gap_filling",
+                "cwd": "${workspaceFolder}",
+                "args": [
+                    "--target", "MSFT",
+                    "--data-dir", "qf/timeseries/notebooks/data",
+                    "--output-dir", "results/custom_run"
+                ],
+                "env": {
+                    "PYTHONPATH": "${workspaceFolder}"
+                },
+                "justMyCode": true
+            }
+        ],
+        "compounds": []
     }
 }

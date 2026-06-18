@@ -1,0 +1,97 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Gap-Filling: MSFT (default)",
+            "type": "python",
+            "request": "launch",
+            "module": "qf.timeseries.gap_filling",
+            "cwd": "${workspaceFolder}",
+            "args": [
+                "--target", "MSFT",
+                "--data-dir", "qf/timeseries/notebooks/data",
+                "--output-dir", "results/msft_default"
+            ],
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            },
+            "justMyCode": true
+        },
+        {
+            "name": "Gap-Filling: ACGL (Insurance)",
+            "type": "python",
+            "request": "launch",
+            "module": "qf.timeseries.gap_filling",
+            "cwd": "${workspaceFolder}",
+            "args": [
+                "--target", "ACGL",
+                "--data-dir", "qf/timeseries/notebooks/data",
+                "--output-dir", "results/acgl_insurance",
+                "--lookback", "120",
+                "--threshold", "0.30",
+                "--max-peers", "8"
+            ],
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            },
+            "justMyCode": true
+        },
+        {
+            "name": "Gap-Filling: ALL sectors",
+            "type": "python",
+            "request": "launch",
+            "module": "qf.timeseries.gap_filling",
+            "cwd": "${workspaceFolder}",
+            "args": [
+                "--target", "ALL",
+                "--data-dir", "qf/timeseries/notebooks/data",
+                "--output-dir", "results/all_sectors",
+                "--no-sweep"
+            ],
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            },
+            "justMyCode": true
+        },
+        {
+            "name": "Gap-Filling: MSFT + sweep + long distress",
+            "type": "python",
+            "request": "launch",
+            "module": "qf.timeseries.gap_filling",
+            "cwd": "${workspaceFolder}",
+            "args": [
+                "--target", "MSFT",
+                "--data-dir", "qf/timeseries/notebooks/data",
+                "--output-dir", "results/msft_sweep_45d",
+                "--dist-length", "45",
+                "--dist-depth", "0.50",
+                "--lookback", "100",
+                "--threshold", "0.40"
+            ],
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            },
+            "justMyCode": true
+        },
+        {
+            "name": "Gap-Filling: custom (edit args)",
+            "type": "python",
+            "request": "launch",
+            "module": "qf.timeseries.gap_filling",
+            "cwd": "${workspaceFolder}",
+            "args": [
+                "--target", "MSFT",
+                "--data-dir", "qf/timeseries/notebooks/data",
+                "--output-dir", "results/custom_run"
+            ],
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            },
+            "presentation": {
+                "hidden": false,
+                "group": "",
+                "order": 1
+            }
+        }
+    ]
+}

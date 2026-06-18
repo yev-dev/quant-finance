@@ -526,6 +526,10 @@ def get_yahoo_query_fundametals_hist(tickers: Union[str, List[str]],
     return wide
 
 
+# Backward-compatible alias (note original misspelling)
+get_yahoo_query_fundamentals_hist = get_yahoo_query_fundametals_hist
+
+
 def get_yahoo_data(tickers_list, start_date, end_date, identifier: str = 'Close'):
     """
     Fetch historical data for a given ticker from Yahoo Finance.
@@ -1253,6 +1257,76 @@ def plot_time_series(series_df: Union[pd.DataFrame, pd.Series],
     ax.legend()
     plt.tight_layout()
     return fig, ax
+
+def get_yahoo_query_full_data_historical(tickers: Optional[Union[List[str], pd.DataFrame]] = None,
+                                         statements: Optional[List[str]] = None,
+                                         period_type: str = 'quarter',
+                                         fields: Optional[List[str]] = None,
+                                         output_format: str = 'long',
+                                         column_order: str = 'ticker_statement_field',
+                                         asynchronous: bool = True,
+                                         cache_path: Optional[str] = None,
+                                         cache_max_age_days: int = 5,
+                                         force_refresh: bool = False) -> pd.DataFrame:
+    """
+    Query historical fundamentals (financial statements) for tickers with CSV caching.
+
+    Wraps get_yahoo_query_fundamentals_hist and stores results in a cache file. When the
+    cache exists and is fresh (<= cache_max_age_days) and force_refresh is False, returns
+    the cached DataFrame.
+
+    Parameters mirror get_yahoo_query_fundamentals_hist plus caching controls.
+    """
+    # Resolve tickers
+    if tickers is None:
+        tickers_df = get_instruments_data(columns=['symbol'])
+        tickers_list: List[str] = tickers_df['symbol'].tolist()
+    elif isinstance(tickers, pd.DataFrame):
+        if 'symbol' in tickers.columns:
+            tickers_list = tickers['symbol'].tolist()
+        else:
+            raise ValueError("tickers DataFrame must contain a 'symbol' column")
+    else:
+        tickers_list = list(tickers)
+
+    # Default cache path varies by output format
+    if cache_path is None:
+        cache_dir = os.path.expanduser('~/.cache/quant-finance')
+        fname = f"yq_fundamentals_hist_{output_format}.csv"
+        cache_path = os.path.join(cache_dir, fname)
+
+    # Load cache if available and fresh
+    if (not force_refresh) and os.path.exists(cache_path):
+        try:
+            mtime = os.path.getmtime(cache_path)
+            age_days = (datetime.now() - datetime.fromtimestamp(mtime)).days
+            if age_days <= cache_max_age_days:
+                cached_df = pd.read_csv(cache_path)
+                return cached_df
+        except Exception:
+            # Ignore cache errors and proceed to fresh fetch
+            pass
+
+    # Fresh fetch
+    df = get_yahoo_query_fundametals_hist(
+        tickers=tickers_list,
+        statements=statements,
+        period_type=period_type,
+        fields=fields,
+        output_format=output_format,
+        column_order=column_order,
+        asynchronous=asynchronous,
+    )
+
+    # Write to cache
+    try:
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        df.to_csv(cache_path, index=False)
+    except Exception:
+        # Non-fatal if caching fails
+        pass
+
+    return df
 
 
 if __name__ == "__main__":
