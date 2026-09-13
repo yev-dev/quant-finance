@@ -1,0 +1,36 @@
+========================================================================
+  NON-LINEAR GAP-FILLING REPORT v2  |  Target: MSFT
+========================================================================
+  Sector      : Information Technology
+  Samples     : 200
+  Distress    : 2025-06-06 – 2025-06-27
+  Lookback    : 60  |  Threshold: 0.35
+
+------------------------------------------------------------------------
+  EVALUATION (non-linear methods, sorted by RMSE)
+------------------------------------------------------------------------
+  Linear Interp                             RMSE=3.3637  MAE=2.5756  RetCorr=-0.0997
+  ML Non-Linear (Raw)                       RMSE=14.7611  MAE=12.0447  RetCorr=-0.2298
+  ML Non-Linear (PCA)                       RMSE=14.7611  MAE=12.0447  RetCorr=-0.2298
+  Forward Fill                              RMSE=16.0262  MAE=13.4373  RetCorr=nan
+  Dynamic RF                                RMSE=16.0262  MAE=13.4373  RetCorr=nan
+  Dynamic GBR                               RMSE=16.0262  MAE=13.4373  RetCorr=nan
+  Dynamic KNN                               RMSE=16.0262  MAE=13.4373  RetCorr=nan
+  Backward Fill                             RMSE=18.4431  MAE=16.2493  RetCorr=0.0692
+
+  * Best (non-linear method): ML Non-Linear (Raw) (RMSE=14.7611)
+
+------------------------------------------------------------------------
+  DRIFT CORRECTION
+------------------------------------------------------------------------
+  ML Non-Linear (Raw) + Rolling Bias                  RMSE=8.8053  MaxDrift=22.0518
+  ML Non-Linear (Raw) + Residual Bias                 RMSE=9.3829  MaxDrift=16.0680
+  ML Non-Linear (Raw) (no correction)                 RMSE=14.7611  MaxDrift=29.8711
+  ML Non-Linear (Raw) + Error Feedback                RMSE=14.7611  MaxDrift=29.8711
+
+------------------------------------------------------------------------
+  BACKTESTING
+------------------------------------------------------------------------
+  TRUE     : TotalReturn=0.0429  Sharpe=0.380
+  OBSERVED : TotalReturn=-0.2180  Sharpe=-1.121
+========================================================================

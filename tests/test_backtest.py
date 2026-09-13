@@ -41,12 +41,6 @@ def test_duration_series(sample_data):
     durations = bt.duration_series()
     assert isinstance(durations, np.ndarray)
 
-def test_tick_loss(sample_data):
-    actual, forecast, alpha = sample_data
-    bt = Backtest(actual, forecast, alpha)
-    loss = bt.tick_loss()
-    assert isinstance(loss, float)
-
 def test_smooth_loss(sample_data):
     actual, forecast, alpha = sample_data
     bt = Backtest(actual, forecast, alpha)

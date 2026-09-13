@@ -1,0 +1,17 @@
+Metadata-Version: 2.4
+Name: qf
+Version: 0.1
+Summary: Quantative Finance library
+Home-page: 
+Author: Yevgeniy Yermoshin
+Author-email: yev.developer@gmail.com
+License: Apache 2.0
+Keywords: pandas,data,analysis,fixed income,stocks,bond,equities,timeseries,quantative,strategies,backtesting
+Dynamic: author
+Dynamic: author-email
+Dynamic: description
+Dynamic: keywords
+Dynamic: license
+Dynamic: summary
+
+Experimental package to explore financila analysis
