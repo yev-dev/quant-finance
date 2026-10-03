@@ -24,5 +24,4 @@ nbconvert
 cvxpy
 PyPortfolioOpt
 yellowbrick
-pyarrow
-fastparquet
+pykalman
